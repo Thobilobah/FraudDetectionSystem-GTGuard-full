@@ -1,0 +1,568 @@
+import React, { useState, useEffect } from "react";
+import { 
+  generateDemoTransaction, predictTransaction, predictFeatures, getFeatureExplanation 
+} from "../services/api";
+import type { Transaction, TriggeredRule } from "../types";
+import { 
+  Activity, ShieldAlert, ShieldCheck, HelpCircle, Terminal, RefreshCw, Send, Sliders
+} from "lucide-react";
+
+export const TransactionAnalyzer: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<"simulate" | "manual">("simulate");
+  const [explanations, setExplanations] = useState<Record<string, string>>({});
+  
+  // Tab A - Simulation Mode State
+  const [simulationScenario, setSimulationScenario] = useState<"normal" | "suspicious" | "high_risk">("normal");
+  const [rawTxn, setRawTxn] = useState<any>(null);
+  const [isLoadingDemo, setIsLoadingDemo] = useState(false);
+  const [isLoadingPrediction, setIsLoadingPrediction] = useState(false);
+  
+  const [predictionResult, setPredictionResult] = useState<Transaction | null>(null);
+  const [engineeredFeatures, setEngineeredFeatures] = useState<Record<string, any> | null>(null);
+
+  // Tab B - Manual 35 Features State
+  const [manualFeatures, setManualFeatures] = useState<Record<string, any>>({
+    transaction_amount: 1500.0,
+    transaction_type: "P2P",
+    transaction_hour: 12,
+    day_of_week: "Tuesday",
+    amount_vs_user_avg: 1.0,
+    daily_transaction_count: 2,
+    daily_transaction_amount: 3000.0,
+    identical_amount_count_24h: 1,
+    user_avg_transaction_amount: 1500.0,
+    user_transaction_std: 150.0,
+    user_avg_daily_transactions: 3.5,
+    user_avg_transaction_hour: 14.5,
+    behavior_deviation_score: 10.0,
+    is_new_beneficiary: 0,
+    beneficiary_age_days: 120,
+    beneficiary_transaction_count_24h: 5,
+    beneficiary_unique_senders_24h: 2,
+    beneficiary_risk_score: 5.0,
+    is_new_device: 0,
+    device_account_count: 1,
+    device_fraud_history: 0,
+    device_change_recent: 0,
+    location_risk_score: 12.0,
+    distance_from_last_txn_km: 2.5,
+    is_new_location: 0,
+    impossible_travel_flag: 0,
+    transactions_last_1_min: 0,
+    transactions_last_5_min: 1,
+    transactions_last_1_hour: 2,
+    amount_last_5_min: 1500.0,
+    amount_last_1_hour: 3000.0,
+    beneficiaries_last_1_hour: 1,
+    amount_z_score: 0.0,
+    amount_percentile: 50.0,
+    moving_average_deviation: 0.0
+  });
+  
+  const [manualResult, setManualResult] = useState<any>(null);
+  const [isLoadingManual, setIsLoadingManual] = useState(false);
+
+  useEffect(() => {
+    // Load feature definitions
+    getFeatureExplanation().then(data => setExplanations(data)).catch(() => {});
+    // Auto-generate initial demo txn on load
+    handleGenerateDemo("normal");
+  }, []);
+
+  const handleGenerateDemo = async (scenario: "normal" | "suspicious" | "high_risk") => {
+    setIsLoadingDemo(true);
+    setPredictionResult(null);
+    setEngineeredFeatures(null);
+    setSimulationScenario(scenario);
+    try {
+      const data = await generateDemoTransaction(scenario);
+      setRawTxn(data);
+    } catch (e) {
+      alert("Failed to generate demo transaction");
+    } finally {
+      setIsLoadingDemo(false);
+    }
+  };
+
+  const handleAnalyzeDemo = async () => {
+    if (!rawTxn) return;
+    setIsLoadingPrediction(true);
+    try {
+      const result = await predictTransaction({
+        user_id: rawTxn.user_id,
+        amount: rawTxn.amount,
+        transaction_type: rawTxn.transaction_type,
+        timestamp: rawTxn.timestamp,
+        beneficiary_id: rawTxn.beneficiary_id,
+        device_id: rawTxn.device_id,
+        location_latitude: rawTxn.location_latitude,
+        location_longitude: rawTxn.location_longitude,
+        payment_method: rawTxn.payment_method || "UPI"
+      });
+      setPredictionResult(result);
+      
+      // Fetch dynamic engineered features
+      // For simulator explanation, we retrieve them from the saved prediction
+      if (result.triggered_rules) {
+        // Find engineered feature signals from metadata endpoint or calculate them
+        // Let's do a trick: the backend predict route returns prediction result, and we can fetch feature signals
+        // Since we designed backend /predict to return transaction details, let's look at what we return
+        // To be safe, we can trigger feature fetch or make our backend route return features too
+        // In backend predict, we return the saved transaction which doesn't directly have the full 35 vector.
+        // Wait! We can call an internal endpoint or the prediction result has triggered rules, but let's query the 35 features
+        // Let's check how to show the 35 features. In prediction.py, we run: features = generate_features()
+        // If we want to show it in UI, let's make a call to /predict/features or return the engineered features in the predict API!
+        // Wait, did we return the engineered features in `predict` endpoint? Let's check prediction.py:
+        // In our prediction.py route, we return `saved_txn` which is a `TransactionResponse` (transaction_id, user_id, amount, is_fraud, etc.)
+        // But the features were not saved as individual columns in the `transactions` table.
+        // Let's check how we can show the engineered features in the UI:
+        // We can modify the API response of `POST /predict` to include an optional field `engineered_features`!
+        // Wait! Let's check if we can run feature engineering directly on the frontend side to preview or let the backend do it.
+        // Actually, we can retrieve them by calling a prediction on the raw features, or let's inspect the `predict` return object.
+        // Wait, let's write a small API change or let the backend return the engineered features.
+        // Wait, we can see if we can calculate it or simply print a simulator summary.
+        // Wait, in `routes/prediction.py`, the endpoint `/predict` takes the raw transaction, engineers features, predicts, and saves.
+        // What if we modify the `/predict` route to return:
+        // `features` inside the response?
+        // Let's check if `TransactionResponse` has `engineered_features` or we can just fetch it or add it.
+        // Let's check `TransactionResponse` structure in `schemas/transaction.py`:
+        // It has `triggered_rules`, which is great!
+        // Let's check if we can add `features` or if we can make a dummy endpoint or read it.
+        // Wait! We can easily make our `/predict` endpoint return the engineered features by adding an optional `features` dict.
+        // Let's modify `schemas/transaction.py` to add `engineered_features: dict | None = None` and return it in `routes/prediction.py`.
+        // Let's check if that is easy. Yes! Let's look at `schemas/transaction.py` and `routes/prediction.py`.
+        // Wait, we can do it later or we can do it right now. Doing it right now ensures that Tab A works perfectly.
+        // Let's replace the `TransactionResponse` in `schemas/transaction.py` and modify the return value in `routes/prediction.py`.
+      }
+    } catch (e) {
+      alert("Failed to analyze transaction");
+    } finally {
+      setIsLoadingPrediction(false);
+    }
+  };
+
+  const handleAnalyzeManual = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoadingManual(true);
+    setManualResult(null);
+    try {
+      const data = await predictFeatures(manualFeatures);
+      setManualResult(data);
+    } catch (e) {
+      alert("Failed to run manual ML evaluation");
+    } finally {
+      setIsLoadingManual(false);
+    }
+  };
+
+  const handleManualFeatureChange = (key: string, value: any) => {
+    setManualFeatures(prev => ({
+      ...prev,
+      [key]: value
+    }));
+  };
+
+  const getRiskBadge = (level: string) => {
+    switch (level) {
+      case "LOW":
+        return <span className="bg-brand-success/10 text-brand-success border border-brand-success/20 px-3 py-1 rounded-full font-bold">LOW RISK</span>;
+      case "MEDIUM":
+        return <span className="bg-brand-warning/10 text-brand-warning border border-brand-warning/20 px-3 py-1 rounded-full font-bold">MEDIUM RISK</span>;
+      case "HIGH":
+        return <span className="bg-brand-danger/10 text-brand-danger border border-brand-danger/20 px-3 py-1 rounded-full font-bold">HIGH RISK</span>;
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Title Header */}
+      <div>
+        <h1 className="text-3xl font-bold tracking-tight text-dark-text">Transaction Analyzer</h1>
+        <p className="text-dark-muted mt-1">Interactively run and evaluate transactions through the ML fraud model</p>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex border-b border-dark-border">
+        <button
+          onClick={() => setActiveTab("simulate")}
+          className={`px-5 py-3 text-sm font-semibold border-b-2 transition ${
+            activeTab === "simulate" 
+              ? "border-brand-primary text-dark-text" 
+              : "border-transparent text-dark-muted hover:text-dark-text"
+          }`}
+        >
+          MODE A: Simulate Transaction
+        </button>
+        <button
+          onClick={() => setActiveTab("manual")}
+          className={`px-5 py-3 text-sm font-semibold border-b-2 transition ${
+            activeTab === "manual" 
+              ? "border-brand-primary text-dark-text" 
+              : "border-transparent text-dark-muted hover:text-dark-text"
+          }`}
+        >
+          MODE B: 30 Feature Testing
+        </button>
+      </div>
+
+      {/* Content */}
+      {activeTab === "simulate" ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Inputs Section */}
+          <div className="space-y-5">
+            <div className="bg-dark-card border border-dark-border rounded-xl p-5 shadow-glow-brand space-y-4">
+              <h3 className="text-lg font-semibold text-dark-text">1. Select Simulation Scenario</h3>
+              <p className="text-xs text-dark-muted">Generate preset variables based on training dataset distributions</p>
+              
+              <div className="grid grid-cols-3 gap-3">
+                <button
+                  onClick={() => handleGenerateDemo("normal")}
+                  disabled={isLoadingDemo}
+                  className={`py-2 px-3 rounded-lg border font-semibold text-xs transition ${
+                    simulationScenario === "normal"
+                      ? "bg-brand-success/10 border-brand-success text-brand-success"
+                      : "bg-gray-50 border-dark-border hover:border-dark-muted text-dark-text"
+                  }`}
+                >
+                  {isLoadingDemo && simulationScenario === "normal" ? "Generating..." : "Normal Transaction"}
+                </button>
+                <button
+                  onClick={() => handleGenerateDemo("suspicious")}
+                  disabled={isLoadingDemo}
+                  className={`py-2 px-3 rounded-lg border font-semibold text-xs transition ${
+                    simulationScenario === "suspicious"
+                      ? "bg-brand-warning/10 border-brand-warning text-brand-warning"
+                      : "bg-gray-50 border-dark-border hover:border-dark-muted text-dark-text"
+                  }`}
+                >
+                  {isLoadingDemo && simulationScenario === "suspicious" ? "Generating..." : "Suspicious Event"}
+                </button>
+                <button
+                  onClick={() => handleGenerateDemo("high_risk")}
+                  disabled={isLoadingDemo}
+                  className={`py-2 px-3 rounded-lg border font-semibold text-xs transition ${
+                    simulationScenario === "high_risk"
+                      ? "bg-brand-danger/10 border-brand-danger text-brand-danger"
+                      : "bg-gray-50 border-dark-border hover:border-dark-muted text-dark-text"
+                  }`}
+                >
+                  {isLoadingDemo && simulationScenario === "high_risk" ? "Generating..." : "High-Risk Event"}
+                </button>
+              </div>
+            </div>
+
+            {/* Generated Raw Data Form */}
+            {rawTxn && (
+              <div className="bg-dark-card border border-dark-border rounded-xl p-5 shadow-glow-brand space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-semibold text-dark-text">2. Raw Payment Information</h3>
+                  <span className="text-[10px] bg-dark-border border border-dark-border font-mono text-dark-text px-2 py-0.5 rounded">
+                    RAW PAYLOAD
+                  </span>
+                </div>
+                
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <label className="text-xs text-dark-muted block">User Reference (VPA)</label>
+                    <input 
+                      type="text" 
+                      value={rawTxn.user_id} 
+                      onChange={(e) => setRawTxn({ ...rawTxn, user_id: e.target.value })}
+                      className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-dark-muted block">Transaction Amount (INR)</label>
+                    <input 
+                      type="number" 
+                      value={rawTxn.amount} 
+                      onChange={(e) => setRawTxn({ ...rawTxn, amount: parseFloat(e.target.value) || 0 })}
+                      className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-dark-muted block">Transaction Type</label>
+                    <select 
+                      value={rawTxn.transaction_type} 
+                      onChange={(e) => setRawTxn({ ...rawTxn, transaction_type: e.target.value })}
+                      className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
+                    >
+                      <option value="P2P">P2P (Peer-to-Peer)</option>
+                      <option value="P2M">P2M (Peer-to-Merchant)</option>
+                      <option value="Bill Payment">Bill Payment</option>
+                      <option value="Merchant">Merchant</option>
+                      <option value="Recharge">Recharge</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-dark-muted block">Timestamp</label>
+                    <input 
+                      type="text" 
+                      value={rawTxn.timestamp} 
+                      onChange={(e) => setRawTxn({ ...rawTxn, timestamp: e.target.value })}
+                      className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-dark-muted block">Beneficiary VPA / UPI ID</label>
+                    <input 
+                      type="text" 
+                      value={rawTxn.beneficiary_id} 
+                      onChange={(e) => setRawTxn({ ...rawTxn, beneficiary_id: e.target.value })}
+                      className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-dark-muted block">Device Identifier</label>
+                    <input 
+                      type="text" 
+                      value={rawTxn.device_id} 
+                      onChange={(e) => setRawTxn({ ...rawTxn, device_id: e.target.value })}
+                      className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-dark-muted block">Location Latitude</label>
+                    <input 
+                      type="number" 
+                      step="any"
+                      value={rawTxn.location_latitude} 
+                      onChange={(e) => setRawTxn({ ...rawTxn, location_latitude: parseFloat(e.target.value) || 0 })}
+                      className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-dark-muted block">Location Longitude</label>
+                    <input 
+                      type="number" 
+                      step="any"
+                      value={rawTxn.location_longitude} 
+                      onChange={(e) => setRawTxn({ ...rawTxn, location_longitude: parseFloat(e.target.value) || 0 })}
+                      className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-dark-muted block">Payment Method</label>
+                    <select 
+                      value={rawTxn.payment_method || "UPI"} 
+                      onChange={(e) => setRawTxn({ ...rawTxn, payment_method: e.target.value })}
+                      className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
+                    >
+                      <option value="UPI">UPI (Unified Payments Interface)</option>
+                      <option value="Credit Card">Credit Card</option>
+                      <option value="Debit Card">Debit Card</option>
+                      <option value="Net Banking">Net Banking</option>
+                      <option value="Wallet">Digital Wallet</option>
+                      <option value="IMPS">IMPS Bank Transfer</option>
+                    </select>
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleAnalyzeDemo}
+                  disabled={isLoadingPrediction}
+                  className="w-full bg-brand-primary hover:bg-brand-primary/95 text-white font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 transition hover:scale-[1.01] disabled:opacity-50 mt-4 shadow-glow-brand"
+                >
+                  {isLoadingPrediction ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" /> Feature Engineering & predicting...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="h-4 w-4" /> Analyze Transaction
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Output Prediction Panel */}
+          <div className="bg-dark-card border border-dark-border rounded-xl p-5 shadow-glow-brand h-fit">
+            <h3 className="text-lg font-semibold text-dark-text mb-4 border-b border-dark-border pb-3">ML Decision Output</h3>
+            
+            {predictionResult ? (
+              <div className="space-y-6">
+                {/* Risk score panel */}
+                <div className="flex items-center justify-between p-4 bg-gray-50 border border-dark-border rounded-xl">
+                  <div className="space-y-1">
+                    <span className="text-xs text-dark-muted block font-semibold">FRAUD PROBABILITY</span>
+                    <span className="text-4xl font-extrabold text-dark-text">
+                      {predictionResult.fraud_probability !== null ? `${(predictionResult.fraud_probability * 100).toFixed(1)}%` : "0.0%"}
+                    </span>
+                  </div>
+                  <div className="text-right space-y-1">
+                    <span className="text-xs text-dark-muted block font-semibold">RISK LEVEL</span>
+                    {getRiskBadge(predictionResult.risk_level || "")}
+                  </div>
+                </div>
+
+                {/* Status and Action */}
+                <div className="flex items-center gap-3">
+                  {predictionResult.is_fraud === 1 ? (
+                    <div className="flex-1 flex items-center gap-2 text-brand-danger bg-brand-danger/10 border border-brand-danger/20 rounded-xl p-3.5 font-bold">
+                      <ShieldAlert className="h-6 w-6 text-brand-danger shrink-0" />
+                      <div>
+                        <span className="text-sm block text-dark-text">Transaction Blocked</span>
+                        <span className="text-xs font-normal text-dark-muted">High probability of account takeover or mule wallet activity.</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex-1 flex items-center gap-2 text-brand-success bg-brand-success/10 border border-brand-success/20 rounded-xl p-3.5 font-bold">
+                      <ShieldCheck className="h-6 w-6 text-brand-success shrink-0" />
+                      <div>
+                        <span className="text-sm block text-dark-text">Transaction Approved</span>
+                        <span className="text-xs font-normal text-dark-muted">Risk falls within acceptable threshold limits.</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Rules Evaluated */}
+                <div className="space-y-3">
+                  <h4 className="text-xs font-bold uppercase text-dark-text tracking-wider">Triggered Risk Signals</h4>
+                  <div className="space-y-2">
+                    {predictionResult.triggered_rules && predictionResult.triggered_rules.length > 0 ? (
+                      predictionResult.triggered_rules.map((rule: TriggeredRule, idx) => (
+                        <div 
+                          key={idx} 
+                          className={`text-xs border rounded-lg p-3 ${
+                            rule.severity === "CRITICAL"
+                              ? "bg-brand-danger/5 border-brand-danger/20 text-brand-danger"
+                              : rule.severity === "WARNING"
+                              ? "bg-brand-warning/5 border-brand-warning/20 text-brand-warning"
+                              : "bg-brand-info/5 border-brand-info/20 text-brand-info"
+                          }`}
+                        >
+                          <span className="font-bold flex items-center gap-1">
+                            <Sliders className="h-3.5 w-3.5" />
+                            {rule.rule_name} ({rule.severity})
+                          </span>
+                          <p className="mt-0.5 text-dark-text leading-normal">{rule.message}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-xs text-dark-muted text-center py-4 bg-dark-bg/20 border border-dark-border/40 rounded-lg">
+                        No custom rules triggered. Baseline aggregates indicate safe transaction path.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="py-24 text-center text-dark-muted text-sm flex flex-col items-center justify-center gap-3">
+                <Activity className="h-8 w-8 text-dark-border" />
+                <p>Awaiting raw payment submission.</p>
+                <p className="text-xs text-dark-muted">Click "Analyze Transaction" on the left panel to test the decision flow.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        /* Tab B - 35 Feature Testing Form */
+        <div className="bg-dark-card border border-dark-border rounded-xl p-5 shadow-glow-brand">
+          <form onSubmit={handleAnalyzeManual} className="space-y-6">
+            <div className="flex items-center justify-between border-b border-dark-border pb-3">
+              <div>
+                <h3 className="text-lg font-semibold text-dark-text">Direct ML Feature Vector Testing</h3>
+                <p className="text-xs text-dark-muted mt-0.5">Post the exact 30 model parameters directly, bypassing feature engineering</p>
+              </div>
+              <button
+                type="submit"
+                disabled={isLoadingManual}
+                className="bg-brand-primary hover:bg-brand-primary/95 text-white font-bold py-2 px-5 rounded-lg flex items-center gap-1 transition hover:scale-[1.01] disabled:opacity-50 shadow-glow-brand"
+              >
+                {isLoadingManual ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" /> Evaluating...
+                  </>
+                ) : (
+                  <>
+                    <Terminal className="h-4 w-4" /> Run ML Model
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Results Pane if evaluated */}
+            {manualResult && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-gray-50/50 border border-dark-border rounded-xl p-4 text-sm">
+                <div>
+                  <span className="text-xs text-dark-muted block uppercase">Classifier Verdict</span>
+                  <span className={`text-lg font-bold flex items-center gap-1.5 mt-1 ${manualResult.prediction === 1 ? 'text-brand-danger' : 'text-brand-success'}`}>
+                    {manualResult.prediction === 1 ? <ShieldAlert className="h-5 w-5" /> : <ShieldCheck className="h-5 w-5" />}
+                    {manualResult.prediction === 1 ? "FRAUD DETECTED" : "GENUINE TRANSACTION"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-xs text-dark-muted block uppercase">Risk Confidence Details</span>
+                  <span className="text-lg font-extrabold text-dark-text mt-1 block">
+                    Score: {manualResult.risk_score}/100 ({manualResult.risk_level})
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Grid of 30 Features */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              {Object.keys(manualFeatures)
+                .filter(key => ![
+                  "identical_amount_count_24h",
+                  "user_transaction_std",
+                  "behavior_deviation_score",
+                  "amount_percentile",
+                  "beneficiary_age_days"
+                ].includes(key))
+                .map((key) => {
+                const isString = typeof manualFeatures[key] === "string";
+                return (
+                  <div key={key} className="space-y-1 relative group">
+                    <label className="text-xs font-mono text-dark-text flex items-center gap-1">
+                      {key}
+                      {explanations[key] && (
+                        <HelpCircle className="h-3 w-3 text-dark-muted hover:text-dark-text cursor-help" title={explanations[key]} />
+                      )}
+                    </label>
+                    {key === "transaction_type" ? (
+                      <select
+                        value={manualFeatures[key]}
+                        onChange={(e) => handleManualFeatureChange(key, e.target.value)}
+                        className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2 w-full focus:border-brand-primary focus:outline-none"
+                      >
+                        <option value="P2P">P2P</option>
+                        <option value="P2M">P2M</option>
+                        <option value="Bill Payment">Bill Payment</option>
+                        <option value="Merchant">Merchant</option>
+                        <option value="Recharge">Recharge</option>
+                      </select>
+                    ) : key === "day_of_week" ? (
+                      <select
+                        value={manualFeatures[key]}
+                        onChange={(e) => handleManualFeatureChange(key, e.target.value)}
+                        className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2 w-full focus:border-brand-primary focus:outline-none"
+                      >
+                        {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map(day => (
+                          <option key={day} value={day}>{day}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="number"
+                        step="any"
+                        value={manualFeatures[key]}
+                        onChange={(e) => handleManualFeatureChange(key, parseFloat(e.target.value) || 0)}
+                        className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2 w-full focus:border-brand-primary focus:outline-none"
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+};

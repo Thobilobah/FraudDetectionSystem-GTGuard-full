@@ -1,0 +1,25 @@
+version: "3.9"
+
+# Spins up a local PostgreSQL instance matching the DATABASE_URL default in
+# backend/.env.example. Run: docker compose up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fraudguard_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fraudguard
+      POSTGRES_PASSWORD: fraudguard
+      POSTGRES_DB: fraudguard_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - fraudguard_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraudguard -d fraudguard_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  fraudguard_pg_data:

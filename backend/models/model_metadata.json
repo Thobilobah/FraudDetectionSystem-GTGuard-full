@@ -1,0 +1,22 @@
+{
+    "selected_model": "Gradient Boosting",
+    "metrics": {
+        "accuracy": 0.9373737373737374,
+        "precision": 0.9857142857142858,
+        "recall": 0.805,
+        "f1": 0.8862385321100917,
+        "roc_auc": 0.963024154589372,
+        "training_time": 2.239314317703247
+    },
+    "confusion_matrix": [
+        [
+            1373,
+            7
+        ],
+        [
+            117,
+            483
+        ]
+    ],
+    "training_timestamp": "2026-09-18 10:59:04"
+}
