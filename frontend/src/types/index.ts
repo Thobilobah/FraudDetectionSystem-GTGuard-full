@@ -22,9 +22,11 @@ export interface Transaction {
   triggered_rules: TriggeredRule[];
   created_at: string;
   payment_method?: string;
-  status?: "APPROVED" | "BLOCKED" | "SUSPENDED" | null;
+  status?: "APPROVED" | "BLOCKED" | "PENDING" | "SUSPENDED" | null;
   resolved_by?: string | null;
   resolved_at?: string | null;
+  claimed_by?: string | null;
+  claimed_at?: string | null;
 }
 
 export interface ModelMetrics {

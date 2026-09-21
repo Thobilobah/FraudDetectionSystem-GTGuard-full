@@ -40,13 +40,13 @@ export const SystemStatus: React.FC<SystemStatusProps> = ({ health }) => {
           <h3 className="text-base font-semibold text-dark-text">System Status</h3>
           
           <div className="space-y-3">
-            <div className="flex items-center justify-between p-3 bg-gray-50 border border-dark-border rounded-lg text-xs">
+            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-white/5 border border-dark-border rounded-lg text-xs">
               <span className="text-dark-muted">Core API Service</span>
               <span className="text-brand-success font-bold flex items-center gap-1">
                 <CheckCircle className="h-3.5 w-3.5" /> Healthy
               </span>
             </div>
-            <div className="flex items-center justify-between p-3 bg-gray-50 border border-dark-border rounded-lg text-xs">
+            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-white/5 border border-dark-border rounded-lg text-xs">
               <span className="text-dark-muted">{health?.database_engine || "PostgreSQL"} Repository</span>
               {health?.database_connected ? (
                 <span className="text-brand-success font-bold flex items-center gap-1">
@@ -58,7 +58,7 @@ export const SystemStatus: React.FC<SystemStatusProps> = ({ health }) => {
                 </span>
               )}
             </div>
-            <div className="flex items-center justify-between p-3 bg-gray-50 border border-dark-border rounded-lg text-xs">
+            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-white/5 border border-dark-border rounded-lg text-xs">
               <span className="text-dark-muted">GTCO Payment Integration</span>
               {isGtcoConfigured ? (
                 <span className="text-brand-success font-bold flex items-center gap-1 uppercase">
@@ -100,7 +100,7 @@ export const SystemStatus: React.FC<SystemStatusProps> = ({ health }) => {
             )}
           </div>
           <div className="space-y-2 mt-3">
-            <div className="text-xs text-dark-muted font-mono bg-gray-50 border border-dark-border p-2.5 rounded-lg">
+            <div className="text-xs text-dark-muted font-mono bg-gray-50 dark:bg-white/5 border border-dark-border p-2.5 rounded-lg">
               <span className="text-[9px] text-dark-muted block uppercase font-bold mb-1 tracking-wider">Local Webhook Endpoint</span>
               http://localhost:8000/webhooks/gtco
             </div>
@@ -122,17 +122,17 @@ export const SystemStatus: React.FC<SystemStatusProps> = ({ health }) => {
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-5 gap-3 pt-2 text-center text-xs">
-          <div className="bg-gray-50/50 border border-dark-border rounded-lg p-3 space-y-1">
+          <div className="bg-gray-50/50 dark:bg-white/5 border border-dark-border rounded-lg p-3 space-y-1">
             <span className="text-[10px] text-brand-info font-bold block">1. RAW WEBHOOK</span>
             <span className="text-dark-text block font-semibold font-mono">Amount, Account, GPS, Time</span>
           </div>
           <div className="flex items-center justify-center text-dark-muted font-bold text-lg">&rarr;</div>
-          <div className="bg-gray-50/50 border border-dark-border rounded-lg p-3 space-y-1 md:col-span-2">
+          <div className="bg-gray-50/50 dark:bg-white/5 border border-dark-border rounded-lg p-3 space-y-1 md:col-span-2">
             <span className="text-[10px] text-guard-orange font-bold block">2. FEATURE ENGINEERING ENGINE</span>
             <span className="text-dark-text block font-semibold">Haversine Distance, SQL History Averages, Velocity Windows</span>
           </div>
           <div className="flex items-center justify-center text-dark-muted font-bold text-lg">&rarr;</div>
-          <div className="bg-gray-50/50 border border-dark-border rounded-lg p-3 space-y-1">
+          <div className="bg-gray-50/50 dark:bg-white/5 border border-dark-border rounded-lg p-3 space-y-1">
             <span className="text-[10px] text-brand-success font-bold block">3. 35 ML DIMENSIONS</span>
             <span className="text-dark-text block font-semibold font-mono">z_score, velocity_5m, travel_flag</span>
           </div>
@@ -145,7 +145,7 @@ export const SystemStatus: React.FC<SystemStatusProps> = ({ health }) => {
           <h3 className="text-lg font-semibold text-dark-text">API Reference Endpoints</h3>
         </div>
 
-        <div className="divide-y divide-gray-100">
+        <div className="divide-y divide-gray-100 dark:divide-dark-border">
           {endpoints.map((ep, idx) => (
             <div key={idx} className="p-4 flex flex-col sm:flex-row items-start gap-3 sm:gap-6 text-sm">
               <span className={`px-3 py-1 rounded text-xs font-bold font-mono min-w-[70px] text-center ${

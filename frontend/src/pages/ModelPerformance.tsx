@@ -2,6 +2,7 @@ import React from "react";
 import type { ModelMetadata, ModelComparison, FeatureImportance } from "../types";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { Award, Zap, BarChart3, Database } from "lucide-react";
+import { useTheme } from "../context/ThemeContext";
 
 interface ModelPerformanceProps {
   modelMeta: ModelMetadata | null;
@@ -16,6 +17,9 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
   featureImportance,
   onSelectModel
 }) => {
+  const { theme } = useTheme();
+  const gridStroke = theme === "dark" ? "#292C33" : "#E5E7EB";
+  const axisStroke = "#9CA3AF";
 
   const formatPercent = (val: number) => `${(val * 100).toFixed(1)}%`;
 
@@ -38,7 +42,7 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
       {modelMeta && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Active Model Summary Card */}
-          <div className="bg-dark-card border border-gray-200 p-5 rounded-xl shadow-glow-brand flex flex-col justify-between md:col-span-1">
+          <div className="bg-dark-card border border-gray-200 dark:border-dark-border p-5 rounded-xl shadow-glow-brand flex flex-col justify-between md:col-span-1">
             <div className="space-y-4">
               <div className="flex items-center gap-2">
                 <div className="p-2 rounded bg-guard-orangeLight text-guard-orange">
@@ -50,18 +54,18 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
                 <span className="text-3xl font-extrabold text-dark-text block mt-2">{modelMeta.selected_model}</span>
                 <span className="text-xs text-dark-muted block mt-1">Selected automatically on highest F1-Score</span>
               </div>
-              <div className="text-xs text-dark-muted font-semibold bg-gray-50 border border-dark-border p-2.5 rounded-lg space-y-1">
+              <div className="text-xs text-dark-muted font-semibold bg-gray-50 dark:bg-white/5 border border-dark-border p-2.5 rounded-lg space-y-1">
                 <div className="flex justify-between"><span>Trained Timestamp:</span><span className="text-dark-text font-mono">{modelMeta.training_timestamp}</span></div>
                 <div className="flex justify-between"><span>Training Dataset Size:</span><span className="text-dark-text">1,000 Records</span></div>
               </div>
             </div>
             
-            <div className="border-t border-gray-100 pt-4 mt-4 grid grid-cols-2 gap-3 text-center text-xs">
-              <div className="bg-gray-50/50 p-2 rounded">
+            <div className="border-t border-gray-100 dark:border-dark-border pt-4 mt-4 grid grid-cols-2 gap-3 text-center text-xs">
+              <div className="bg-gray-50/50 dark:bg-white/5 p-2 rounded">
                 <span className="text-dark-muted block font-semibold">F1 Accuracy</span>
                 <span className="text-sm font-bold text-dark-text">{formatPercent(modelMeta.metrics.f1)}</span>
               </div>
-              <div className="bg-gray-50/50 p-2 rounded">
+              <div className="bg-gray-50/50 dark:bg-white/5 p-2 rounded">
                 <span className="text-dark-muted block font-semibold">Recall Sensitivity</span>
                 <span className="text-sm font-bold text-dark-text">{formatPercent(modelMeta.metrics.recall)}</span>
               </div>
@@ -83,25 +87,25 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
             {modelMeta.confusion_matrix ? (
               <div className="grid grid-cols-2 gap-4 max-w-md mx-auto pt-3">
                 {/* TN */}
-                <div className="bg-gray-50 border border-dark-border p-4 rounded-xl text-center space-y-1.5">
+                <div className="bg-gray-50 dark:bg-white/5 border border-dark-border p-4 rounded-xl text-center space-y-1.5">
                   <span className="text-[10px] text-brand-success font-extrabold tracking-wider block uppercase">True Negative (TN)</span>
                   <span className="text-2xl font-bold text-dark-text">{modelMeta.confusion_matrix[0][0]}</span>
                   <span className="text-[10px] text-dark-muted block">Genuine correctly flagged</span>
                 </div>
                 {/* FP */}
-                <div className="bg-gray-50 border border-brand-warning/20 p-4 rounded-xl text-center space-y-1.5">
+                <div className="bg-gray-50 dark:bg-white/5 border border-brand-warning/20 p-4 rounded-xl text-center space-y-1.5">
                   <span className="text-[10px] text-brand-warning font-extrabold tracking-wider block uppercase">False Positive (FP)</span>
                   <span className="text-2xl font-bold text-dark-text">{modelMeta.confusion_matrix[0][1]}</span>
                   <span className="text-[10px] text-dark-muted block">Genuine blocked (friction)</span>
                 </div>
                 {/* FN */}
-                <div className="bg-gray-50 border border-brand-danger/20 p-4 rounded-xl text-center space-y-1.5">
+                <div className="bg-gray-50 dark:bg-white/5 border border-brand-danger/20 p-4 rounded-xl text-center space-y-1.5">
                   <span className="text-[10px] text-brand-danger/60 font-extrabold tracking-wider block uppercase">False Negative (FN)</span>
                   <span className="text-2xl font-bold text-dark-text">{modelMeta.confusion_matrix[1][0]}</span>
                   <span className="text-[10px] text-dark-muted block">Fraud slipped through</span>
                 </div>
                 {/* TP */}
-                <div className="bg-gray-50 border border-brand-success/40 p-4 rounded-xl text-center space-y-1.5">
+                <div className="bg-gray-50 dark:bg-white/5 border border-brand-success/40 p-4 rounded-xl text-center space-y-1.5">
                   <span className="text-[10px] text-brand-success font-extrabold tracking-wider block uppercase">True Positive (TP)</span>
                   <span className="text-2xl font-bold text-dark-text">{modelMeta.confusion_matrix[1][1]}</span>
                   <span className="text-[10px] text-dark-muted block">Fraud successfully blocked</span>
@@ -126,7 +130,7 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
         <div className="overflow-x-auto">
           {comparison.length > 0 ? (
             <table className="w-full text-left border-collapse">
-              <thead className="bg-gray-100/70 text-[11px] text-dark-muted uppercase font-bold tracking-wider">
+              <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider">
                 <tr>
                   <th className="px-5 py-3">Classifier</th>
                   <th className="px-5 py-3 text-center">F1 Score</th>
@@ -138,7 +142,7 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
                   <th className="px-5 py-3 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100 text-sm">
+              <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
                 {comparison.map((row, idx) => {
                   const isSelected = modelMeta?.selected_model === row.Model;
                   return (
@@ -204,14 +208,14 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
                 layout="vertical"
                 margin={{ top: 5, right: 10, left: 40, bottom: 5 }}
               >
-                <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
-                <XAxis type="number" stroke="#9CA3AF" fontSize={11} />
-                <YAxis dataKey="name" type="category" stroke="#9CA3AF" fontSize={11} width={150} />
+                <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+                <XAxis type="number" stroke={axisStroke} fontSize={11} />
+                <YAxis dataKey="name" type="category" stroke={axisStroke} fontSize={11} width={150} />
                 <Tooltip 
                   contentStyle={{ backgroundColor: "#151D30", borderColor: "#222E4A", color: "#F3F4F6" }} 
                   itemStyle={{ color: "#F3F4F6" }}
                 />
-                <Bar dataKey="Importance" fill="#2563EB" radius={[0, 4, 4, 0]} barSize={14} />
+                <Bar dataKey="Importance" fill="#FF5A21" radius={[0, 4, 4, 0]} barSize={14} />
               </BarChart>
             </ResponsiveContainer>
           ) : (

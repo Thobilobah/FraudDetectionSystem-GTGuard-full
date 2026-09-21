@@ -7,6 +7,7 @@ import {
 import { 
   ShieldAlert, ShieldCheck, Activity, Percent, ArrowUpRight, TrendingUp, AlertTriangle
 } from "lucide-react";
+import { useTheme } from "../context/ThemeContext";
 
 interface DashboardProps {
   metrics: RealTimeMetrics;
@@ -21,6 +22,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   latestTransactions,
   onNavigate
 }) => {
+  const { theme } = useTheme();
+  const gridStroke = theme === "dark" ? "#292C33" : "#E5E7EB";
+  const axisStroke = "#9CA3AF"; // mid-gray reads fine on both light and dark backgrounds
   const highRiskAlerts = latestTransactions
     .filter(t => t.risk_score !== null && t.risk_score >= 70)
     .slice(0, 5);
@@ -85,7 +89,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         {kpis.map((kpi, idx) => (
           <div 
             key={idx} 
-            className={`bg-dark-card border ${kpi.border} rounded-xl p-5 shadow-glow-brand flex items-center justify-between transition hover:scale-[1.02]`}
+            className={`bg-dark-card border ${kpi.border} dark:border-dark-border rounded-xl p-5 shadow-glow-brand flex items-center justify-between transition hover:scale-[1.02]`}
           >
             <div>
               <p className="text-sm font-medium text-dark-muted">{kpi.title}</p>
@@ -126,9 +130,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       <stop offset="95%" stopColor="#EF4444" stopOpacity={0}/>
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
-                  <XAxis dataKey="hour" stroke="#9CA3AF" fontSize={11} />
-                  <YAxis stroke="#9CA3AF" fontSize={11} />
+                  <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+                  <XAxis dataKey="hour" stroke={axisStroke} fontSize={11} />
+                  <YAxis stroke={axisStroke} fontSize={11} />
                   <Tooltip 
                     contentStyle={{ backgroundColor: "#151D30", borderColor: "#222E4A", color: "#F3F4F6" }} 
                     itemStyle={{ color: "#F3F4F6" }}

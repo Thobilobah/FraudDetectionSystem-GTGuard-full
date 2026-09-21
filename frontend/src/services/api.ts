@@ -39,6 +39,7 @@ api.interceptors.response.use(
 export interface AuthUser {
   email: string;
   name: string;
+  role: string; // "admin" or "analyst" - determines resolve/claim permissions
 }
 
 export const login = async (email: string, password: string): Promise<AuthUser> => {
@@ -111,5 +112,32 @@ export const resolveTransaction = async (
 ): Promise<Transaction> => {
   const response = await api.patch(`/transactions/${transactionId}/resolve`, { decision });
   return response.data;
+};
+
+export const suspendTransaction = async (transactionId: string): Promise<Transaction> => {
+  const response = await api.patch(`/transactions/${transactionId}/suspend`);
+  return response.data;
+};
+
+/**
+ * Admin-only: downloads a CSV report for the given date range and triggers
+ * a browser save-as, so an admin can see who claimed/resolved every
+ * transaction without needing to open the dashboard.
+ */
+export const exportTransactionsCsv = async (startDate: string, endDate: string): Promise<void> => {
+  const response = await api.get("/transactions/export", {
+    params: { start_date: startDate, end_date: endDate },
+    responseType: "blob",
+  });
+
+  const blob = new Blob([response.data], { type: "text/csv" });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `gt-guard-transactions_${startDate}_to_${endDate}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
 };
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { getHealth, getAnalytics, getTransactions, selectActiveModel, isAuthenticated, getStoredUser, logout } from "./services/api";
 import type { RealTimeMetrics, ModelMetadata, ModelComparison, FeatureImportance, Transaction } from "./types";
+import { useToast } from "./context/ToastContext";
 import { Dashboard } from "./pages/Dashboard";
 import { LiveMonitor } from "./pages/LiveMonitor";
 import { TransactionAnalyzer } from "./pages/TransactionAnalyzer";
@@ -10,10 +11,13 @@ import { SystemStatus } from "./pages/SystemStatus";
 import { Login } from "./pages/Login";
 import { 
   Shield, LayoutDashboard, Radio, Activity, BarChart2, History, Server,
-  Menu, X, AlertTriangle, ShieldCheck, LogOut
+  Menu, X, AlertTriangle, ShieldCheck, LogOut, Moon, Sun
 } from "lucide-react";
+import { useTheme } from "./context/ThemeContext";
 
 export default function App() {
+  const { showToast } = useToast();
+  const { theme, toggleTheme } = useTheme();
   const [authed, setAuthed] = useState<boolean>(isAuthenticated());
   const [currentUser, setCurrentUser] = useState(getStoredUser());
   const [activeTab, setActiveTab] = useState<string>("dashboard");
@@ -91,6 +95,7 @@ export default function App() {
   const handleLoginSuccess = () => {
     setCurrentUser(getStoredUser());
     setAuthed(true);
+    showToast("success", "Login successful", "Welcome back to GT GUARD.");
   };
 
   const handleLogout = () => {
@@ -253,13 +258,20 @@ export default function App() {
               <span className="h-2 w-2 rounded-full bg-brand-success animate-ping"></span>
               <span className="text-xs font-bold text-dark-muted">Feeds Status: Live Surveillance</span>
             </div>
+            <button
+              onClick={toggleTheme}
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              className="h-8 w-8 rounded-full flex items-center justify-center text-dark-muted hover:text-guard-orange hover:bg-guard-orangeLight transition"
+            >
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
             <div className="h-8 w-8 rounded-full bg-guard-orange/15 border border-guard-orange/30 flex items-center justify-center font-bold text-sm text-guard-orange uppercase" title={currentUser?.email || ""}>
               {currentUser?.name ? currentUser.name.slice(0, 2).toUpperCase() : "UF"}
             </div>
             <button
               onClick={handleLogout}
               title="Sign out"
-              className="h-8 w-8 rounded-full flex items-center justify-center text-dark-muted hover:text-brand-danger hover:bg-red-50 transition"
+              className="h-8 w-8 rounded-full flex items-center justify-center text-dark-muted hover:text-brand-danger hover:bg-red-50 dark:hover:bg-brand-danger/10 transition"
             >
               <LogOut className="h-4 w-4" />
             </button>

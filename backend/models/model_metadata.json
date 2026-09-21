@@ -1,12 +1,38 @@
 {
     "selected_model": "Gradient Boosting",
+    "trained_on": "dataset.csv (Nigerian NIBSS data)",
+    "features_with_no_data": [
+        "identical_amount_count_24h",
+        "user_avg_daily_transactions",
+        "user_avg_transaction_hour",
+        "behavior_deviation_score",
+        "is_new_beneficiary",
+        "beneficiary_age_days",
+        "beneficiary_transaction_count_24h",
+        "beneficiary_unique_senders_24h",
+        "is_new_device",
+        "device_account_count",
+        "device_fraud_history",
+        "device_change_recent",
+        "location_risk_score",
+        "distance_from_last_txn_km",
+        "is_new_location",
+        "impossible_travel_flag",
+        "transactions_last_1_min",
+        "transactions_last_5_min",
+        "transactions_last_1_hour",
+        "amount_last_5_min",
+        "amount_last_1_hour",
+        "beneficiaries_last_1_hour",
+        "amount_percentile"
+    ],
     "metrics": {
         "accuracy": 0.9373737373737374,
         "precision": 0.9857142857142858,
         "recall": 0.805,
         "f1": 0.8862385321100917,
-        "roc_auc": 0.963024154589372,
-        "training_time": 2.239314317703247
+        "roc_auc": 0.963050724637681,
+        "training_time": 3.2140491008758545
     },
     "confusion_matrix": [
         [
@@ -18,5 +44,5 @@
             483
         ]
     ],
-    "training_timestamp": "2026-09-18 10:59:04"
+    "training_timestamp": "2026-09-18 10:35:39"
 }

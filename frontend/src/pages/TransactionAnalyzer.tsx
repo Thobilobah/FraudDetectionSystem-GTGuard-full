@@ -6,8 +6,11 @@ import type { TriggeredRule } from "../types";
 import { 
   Activity, ShieldAlert, ShieldCheck, HelpCircle, Terminal, RefreshCw, Send, Sliders, PauseCircle
 } from "lucide-react";
+import { useToast } from "../context/ToastContext";
+import { FraudGauge } from "../components/FraudGauge";
 
 export const TransactionAnalyzer: React.FC = () => {
+  const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<"simulate" | "manual">("simulate");
   const [explanations, setExplanations] = useState<Record<string, string>>({});
   
@@ -108,6 +111,13 @@ export const TransactionAnalyzer: React.FC = () => {
         payment_method: rawTxn.payment_method
       });
       setPredictionResult({ ...result, is_fraud: result.prediction });
+      if (result.status === "PENDING") {
+        showToast(
+          "suspended",
+          "Flagged for review",
+          `${result.transaction_id || "This transaction"} is medium risk and awaiting analyst or admin action.`
+        );
+      }
     } catch (e) {
       alert("Failed to analyze transaction");
     } finally {
@@ -122,6 +132,13 @@ export const TransactionAnalyzer: React.FC = () => {
     try {
       const data = await predictFeatures(manualFeatures);
       setManualResult(data);
+      if (data.status === "PENDING") {
+        showToast(
+          "suspended",
+          "Flagged for review",
+          `${data.transaction_id || "This transaction"} is medium risk and awaiting analyst or admin action.`
+        );
+      }
     } catch (e) {
       alert("Failed to run manual ML evaluation");
     } finally {
@@ -139,11 +156,11 @@ export const TransactionAnalyzer: React.FC = () => {
   const getRiskBadge = (level: string) => {
     switch (level) {
       case "LOW":
-        return <span className="bg-brand-success/10 text-brand-success border border-brand-success/20 px-3 py-1 rounded-full font-bold">LOW RISK</span>;
+        return <span className="bg-brand-success/10 text-brand-success border border-brand-success/20 px-3 py-1 rounded-full font-bold text-xs whitespace-nowrap">LOW RISK</span>;
       case "MEDIUM":
-        return <span className="bg-brand-warning/10 text-brand-warning border border-brand-warning/20 px-3 py-1 rounded-full font-bold">MEDIUM RISK</span>;
+        return <span className="bg-brand-warning/10 text-brand-warning border border-brand-warning/20 px-3 py-1 rounded-full font-bold text-xs whitespace-nowrap">MEDIUM RISK</span>;
       case "HIGH":
-        return <span className="bg-brand-danger/10 text-brand-danger border border-brand-danger/20 px-3 py-1 rounded-full font-bold">HIGH RISK</span>;
+        return <span className="bg-brand-danger/10 text-brand-danger border border-brand-danger/20 px-3 py-1 rounded-full font-bold text-xs whitespace-nowrap">HIGH RISK</span>;
       default:
         return null;
     }
@@ -197,7 +214,7 @@ export const TransactionAnalyzer: React.FC = () => {
                   className={`py-2 px-3 rounded-lg border font-semibold text-xs transition ${
                     simulationScenario === "normal"
                       ? "bg-brand-success/10 border-brand-success text-brand-success"
-                      : "bg-gray-50 border-dark-border hover:border-dark-muted text-dark-text"
+                      : "bg-gray-50 dark:bg-white/5 border-dark-border hover:border-dark-muted text-dark-text"
                   }`}
                 >
                   {isLoadingDemo && simulationScenario === "normal" ? "Generating..." : "Normal Transaction"}
@@ -208,7 +225,7 @@ export const TransactionAnalyzer: React.FC = () => {
                   className={`py-2 px-3 rounded-lg border font-semibold text-xs transition ${
                     simulationScenario === "suspicious"
                       ? "bg-brand-warning/10 border-brand-warning text-brand-warning"
-                      : "bg-gray-50 border-dark-border hover:border-dark-muted text-dark-text"
+                      : "bg-gray-50 dark:bg-white/5 border-dark-border hover:border-dark-muted text-dark-text"
                   }`}
                 >
                   {isLoadingDemo && simulationScenario === "suspicious" ? "Generating..." : "Suspicious Event"}
@@ -219,7 +236,7 @@ export const TransactionAnalyzer: React.FC = () => {
                   className={`py-2 px-3 rounded-lg border font-semibold text-xs transition ${
                     simulationScenario === "high_risk"
                       ? "bg-brand-danger/10 border-brand-danger text-brand-danger"
-                      : "bg-gray-50 border-dark-border hover:border-dark-muted text-dark-text"
+                      : "bg-gray-50 dark:bg-white/5 border-dark-border hover:border-dark-muted text-dark-text"
                   }`}
                 >
                   {isLoadingDemo && simulationScenario === "high_risk" ? "Generating..." : "High-Risk Event"}
@@ -325,11 +342,10 @@ export const TransactionAnalyzer: React.FC = () => {
                       className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
                     >
                       <option value="USSD">USSD (*737# Banking Code)</option>
-                      <option value="Credit Card">Credit Card</option>
                       <option value="Debit Card">Debit Card</option>
                       <option value="Net Banking">Net Banking</option>
                       <option value="Wallet">Digital Wallet</option>
-                      <option value="IMPS">IMPS Bank Transfer</option>
+                      <option value="Mobile Transfer">Mobile Transfer</option>
                     </select>
                   </div>
                 </div>
@@ -360,14 +376,16 @@ export const TransactionAnalyzer: React.FC = () => {
             {predictionResult ? (
               <div className="space-y-6">
                 {/* Risk score panel */}
-                <div className="flex items-center justify-between p-4 bg-gray-50 border border-dark-border rounded-xl">
-                  <div className="space-y-1">
-                    <span className="text-xs text-dark-muted block font-semibold">FRAUD PROBABILITY</span>
-                    <span className="text-4xl font-extrabold text-dark-text">
-                      {predictionResult.fraud_probability !== null ? `${(predictionResult.fraud_probability * 100).toFixed(1)}%` : "0.0%"}
-                    </span>
+                <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-white/5 border border-dark-border rounded-xl">
+                  <div className="flex flex-col items-center gap-1.5">
+                    <FraudGauge
+                      percentage={predictionResult.fraud_probability !== null ? predictionResult.fraud_probability * 100 : 0}
+                      riskLevel={predictionResult.risk_level || "LOW"}
+                      size={128}
+                    />
+                    <span className="text-[10px] text-dark-muted font-bold tracking-wider uppercase">Fraud Probability</span>
                   </div>
-                  <div className="text-right space-y-1">
+                  <div className="text-right space-y-2">
                     <span className="text-xs text-dark-muted block font-semibold">RISK LEVEL</span>
                     {getRiskBadge(predictionResult.risk_level || "")}
                   </div>
@@ -375,7 +393,15 @@ export const TransactionAnalyzer: React.FC = () => {
 
                 {/* Status and Action */}
                 <div className="flex items-center gap-3">
-                  {predictionResult.status === "SUSPENDED" ? (
+                  {predictionResult.status === "PENDING" ? (
+                    <div className="flex-1 flex items-center gap-2 text-guard-orange bg-guard-orangeLight border border-guard-orange/30 rounded-xl p-3.5 font-bold">
+                      <PauseCircle className="h-6 w-6 text-guard-orange shrink-0" />
+                      <div>
+                        <span className="text-sm block text-dark-text">Flagged for Review</span>
+                        <span className="text-xs font-normal text-dark-muted">Medium risk — an analyst can suspend it, or an admin can resolve it directly.</span>
+                      </div>
+                    </div>
+                  ) : predictionResult.status === "SUSPENDED" ? (
                     <div className="flex-1 flex items-center gap-2 text-guard-orange bg-guard-orangeLight border border-guard-orange/30 rounded-xl p-3.5 font-bold">
                       <PauseCircle className="h-6 w-6 text-guard-orange shrink-0" />
                       <div>
@@ -402,9 +428,9 @@ export const TransactionAnalyzer: React.FC = () => {
                   )}
                 </div>
 
-                {predictionResult.status === "SUSPENDED" && (
+                {(predictionResult.status === "PENDING" || predictionResult.status === "SUSPENDED") && (
                   <p className="text-[11px] text-dark-muted -mt-3 px-1">
-                    Head to <span className="font-semibold text-dark-text">Live Monitor</span> to review or resolve this transaction (admin accounts only).
+                    Head to <span className="font-semibold text-dark-text">Live Monitor</span> to flag or resolve this transaction.
                   </p>
                 )}
 
@@ -476,20 +502,20 @@ export const TransactionAnalyzer: React.FC = () => {
 
             {/* Results Pane if evaluated */}
             {manualResult && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-gray-50/50 border border-dark-border rounded-xl p-4 text-sm">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-gray-50/50 dark:bg-white/5 border border-dark-border rounded-xl p-4 text-sm">
                 <div>
                   <span className="text-xs text-dark-muted block uppercase">Classifier Verdict</span>
                   <span className={`text-lg font-bold flex items-center gap-1.5 mt-1 ${
-                    manualResult.status === "SUSPENDED" ? "text-guard-orange" : manualResult.prediction === 1 ? "text-brand-danger" : "text-brand-success"
+                    manualResult.status === "PENDING" || manualResult.status === "SUSPENDED" ? "text-guard-orange" : manualResult.prediction === 1 ? "text-brand-danger" : "text-brand-success"
                   }`}>
-                    {manualResult.status === "SUSPENDED" ? (
+                    {manualResult.status === "PENDING" || manualResult.status === "SUSPENDED" ? (
                       <PauseCircle className="h-5 w-5" />
                     ) : manualResult.prediction === 1 ? (
                       <ShieldAlert className="h-5 w-5" />
                     ) : (
                       <ShieldCheck className="h-5 w-5" />
                     )}
-                    {manualResult.status === "SUSPENDED" ? "SUSPENDED — PENDING REVIEW" : manualResult.prediction === 1 ? "FRAUD DETECTED" : "GENUINE TRANSACTION"}
+                    {manualResult.status === "PENDING" ? "FLAGGED FOR REVIEW" : manualResult.status === "SUSPENDED" ? "SUSPENDED — PENDING REVIEW" : manualResult.prediction === 1 ? "FRAUD DETECTED" : "GENUINE TRANSACTION"}
                   </span>
                 </div>
                 <div>

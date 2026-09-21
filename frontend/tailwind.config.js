@@ -1,5 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+  darkMode: 'class',
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
@@ -8,11 +9,11 @@ export default {
     extend: {
       colors: {
         dark: {
-          bg: '#F3F4F6',      // Light Slate/Grey background (Zentra style)
-          card: '#FFFFFF',    // Pure White Card background
-          border: '#E5E7EB',  // Light Grey Border
-          text: '#111827',    // Dark Slate Text
-          muted: '#6B7280',   // Medium Grey
+          bg: 'rgb(var(--color-bg) / <alpha-value>)',
+          card: 'rgb(var(--color-card) / <alpha-value>)',
+          border: 'rgb(var(--color-border) / <alpha-value>)',
+          text: 'rgb(var(--color-text) / <alpha-value>)',
+          muted: 'rgb(var(--color-muted) / <alpha-value>)',
         },
         brand: {
           primary: '#1E293B',  // Dark Slate/Charcoal for pill buttons (Zentra style)
@@ -23,7 +24,7 @@ export default {
         },
         guard: {
           orange: '#FF5A21',       // GT GUARD primary accent
-          orangeLight: '#FFF1EE',
+          orangeLight: 'rgb(var(--color-orange-light) / <alpha-value>)',
           panel: '#11131A',        // Login page dark brand panel
           panelBorder: '#292C33',
         }

@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import type { Transaction } from "../types";
-import { resolveTransaction, getStoredUser } from "../services/api";
-import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2 } from "lucide-react";
+import { resolveTransaction, suspendTransaction, getStoredUser } from "../services/api";
+import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User } from "lucide-react";
+import { useToast } from "../context/ToastContext";
 
 interface LiveMonitorProps {
   transactions: Transaction[];
@@ -9,9 +10,12 @@ interface LiveMonitorProps {
 }
 
 export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefresh }) => {
+  const { showToast } = useToast();
   const [selectedTxn, setSelectedTxn] = useState<Transaction | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
+  const [claimingId, setClaimingId] = useState<string | null>(null);
+  const [claimError, setClaimError] = useState<string | null>(null);
   const currentUser = getStoredUser();
   const isAdmin = currentUser?.role === "admin";
 
@@ -28,11 +32,38 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
       if (selectedTxn?.transaction_id === txnId) {
         setSelectedTxn({ ...selectedTxn, ...updated });
       }
+      if (decision === "APPROVED") {
+        showToast("success", "Transaction approved", `${txnId} has been cleared and marked APPROVED.`);
+      } else {
+        showToast("danger", "Transaction blocked", `${txnId} has been declined and marked BLOCKED.`);
+      }
       await onRefresh();
     } catch (e) {
       console.error("Failed to resolve transaction:", e);
+      showToast("danger", "Action failed", "Could not resolve this transaction. Please try again.");
     } finally {
       setResolvingId(null);
+    }
+  };
+
+  const handleSuspend = async (txnId: string) => {
+    setClaimingId(txnId);
+    setClaimError(null);
+    try {
+      const updated = await suspendTransaction(txnId);
+      if (selectedTxn?.transaction_id === txnId) {
+        setSelectedTxn({ ...selectedTxn, ...updated });
+      }
+      showToast("suspended", "Transaction suspended", `${txnId} is now flagged under your name, pending admin review.`);
+      await onRefresh();
+    } catch (e: any) {
+      // Most likely a 400: someone else already suspended it a moment before
+      // this click landed (it's no longer PENDING). Surface that clearly.
+      const detail = e?.response?.data?.detail;
+      setClaimError(detail || "Could not suspend this transaction. It may have already been handled.");
+      await onRefresh();
+    } finally {
+      setClaimingId(null);
     }
   };
 
@@ -50,6 +81,13 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
   };
 
   const getStatusDisplay = (status: string | null | undefined) => {
+    if (status === "PENDING") {
+      return (
+        <div className="flex items-center gap-1 text-brand-info font-semibold text-xs">
+          <AlertCircle className="h-4 w-4" /> Pending
+        </div>
+      );
+    }
     if (status === "SUSPENDED") {
       return (
         <div className="flex items-center gap-1 text-guard-orange font-semibold text-xs">
@@ -71,39 +109,80 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
     );
   };
 
-  // ACTION cell: LOW -> plain "Approved" label, HIGH -> plain "Blocked" label,
-  // MEDIUM/SUSPENDED -> a real Suspend button (or, for an admin, inline
-  // Approve/Block resolve buttons since they're the ones allowed to clear it).
+  // ACTION cell: LOW -> plain "Approved" label, HIGH -> plain "Blocked" label.
+  // MEDIUM starts as PENDING (nobody has acted on it yet):
+  //   - admins can resolve it immediately (Approve/Block), bypassing analysts entirely
+  //   - analysts get a "Suspend Transaction" button - clicking it is a deliberate
+  //     flag: it moves the transaction to SUSPENDED and records their email as
+  //     who flagged it, in one action.
+  // Once SUSPENDED, admins keep their Approve/Block buttons (now alongside the
+  // flagged-by icon), and analysts see a read-only icon - clicking it (or the
+  // row) reveals who flagged it in the detail panel, rather than spelling the
+  // email out in the table itself.
   const getActionCell = (txn: Transaction) => {
     const isBusy = resolvingId === txn.transaction_id;
+    const isSuspending = claimingId === txn.transaction_id;
+    const isFlagged = !!txn.claimed_by;
+
+    const flaggedIcon = (
+      <div
+        className="flex items-center justify-center h-[22px] w-[22px] rounded-full bg-guard-orangeLight border border-guard-orange/40 text-guard-orange shrink-0"
+        title="This transaction has been flagged - click to see who"
+      >
+        <User className="h-3 w-3" />
+      </div>
+    );
+
+    const resolveButtons = (
+      <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+        <button
+          disabled={isBusy}
+          onClick={() => handleResolve(txn.transaction_id, "APPROVED")}
+          className="text-[10px] font-bold px-1.5 py-1 rounded-md bg-brand-success/10 text-brand-success border border-brand-success/30 hover:bg-brand-success/20 transition disabled:opacity-50 whitespace-nowrap"
+        >
+          Approve
+        </button>
+        <button
+          disabled={isBusy}
+          onClick={() => handleResolve(txn.transaction_id, "BLOCKED")}
+          className="text-[10px] font-bold px-1.5 py-1 rounded-md bg-brand-danger/10 text-brand-danger border border-brand-danger/30 hover:bg-brand-danger/20 transition disabled:opacity-50 whitespace-nowrap"
+        >
+          Block
+        </button>
+        {isBusy && <Loader2 className="h-3.5 w-3.5 animate-spin text-dark-muted" />}
+        {isFlagged && (
+          <span onClick={() => setSelectedTxn(txn)} className="cursor-pointer">
+            {flaggedIcon}
+          </span>
+        )}
+      </div>
+    );
+
+    if (txn.status === "PENDING") {
+      if (isAdmin) return resolveButtons;
+      return (
+        <button
+          disabled={isSuspending}
+          onClick={(e) => { e.stopPropagation(); handleSuspend(txn.transaction_id); }}
+          className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-md bg-guard-orangeLight text-guard-orange border border-guard-orange/30 hover:bg-guard-orange/20 transition disabled:opacity-50"
+        >
+          {isSuspending ? <Loader2 className="h-3 w-3 animate-spin" /> : <PauseCircle className="h-3 w-3" />}
+          {isSuspending ? "Suspending..." : "Suspend Transaction"}
+        </button>
+      );
+    }
 
     if (txn.status === "SUSPENDED") {
-      if (isAdmin) {
+      if (isAdmin) return resolveButtons;
+
+      if (isFlagged) {
         return (
-          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-            <button
-              disabled={isBusy}
-              onClick={() => handleResolve(txn.transaction_id, "APPROVED")}
-              className="text-[10px] font-bold px-1.5 py-1 rounded-md bg-brand-success/10 text-brand-success border border-brand-success/30 hover:bg-brand-success/20 transition disabled:opacity-50 whitespace-nowrap"
-            >
-              Approve
-            </button>
-            <button
-              disabled={isBusy}
-              onClick={() => handleResolve(txn.transaction_id, "BLOCKED")}
-              className="text-[10px] font-bold px-1.5 py-1 rounded-md bg-brand-danger/10 text-brand-danger border border-brand-danger/30 hover:bg-brand-danger/20 transition disabled:opacity-50 whitespace-nowrap"
-            >
-              Block
-            </button>
-            {isBusy && <Loader2 className="h-3.5 w-3.5 animate-spin text-dark-muted" />}
-          </div>
+          <span onClick={(e) => { e.stopPropagation(); setSelectedTxn(txn); }} className="cursor-pointer inline-flex">
+            {flaggedIcon}
+          </span>
         );
       }
-      return (
-        <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-md bg-guard-orangeLight text-guard-orange border border-guard-orange/30">
-          <PauseCircle className="h-3 w-3" /> Suspend
-        </span>
-      );
+      return <span className="text-xs font-semibold text-guard-orange">Suspended</span>;
     }
 
     if (txn.status === "BLOCKED") {
@@ -114,6 +193,12 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
 
   return (
     <div className="space-y-6">
+      {claimError && (
+        <div className="bg-brand-danger/10 border border-brand-danger/30 text-brand-danger text-xs font-semibold rounded-lg px-4 py-3 flex items-center justify-between">
+          <span>{claimError}</span>
+          <button onClick={() => setClaimError(null)} className="text-brand-danger/70 hover:text-brand-danger font-bold px-2">✕</button>
+        </div>
+      )}
       {/* Title Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -143,7 +228,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
           <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
             {transactions.length > 0 ? (
               <table className="w-full text-left border-collapse">
-                <thead className="bg-gray-100/70 text-[11px] text-dark-muted uppercase font-bold tracking-wider sticky top-0">
+                <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider sticky top-0">
                   <tr>
                     <th className="px-3 py-3">Txn ID</th>
                     <th className="px-3 py-3">User</th>
@@ -154,14 +239,14 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
                     <th className="px-3 py-3 text-right">Time</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100 text-sm">
+                <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
                   {transactions.map((txn, idx) => (
                     <tr
                       key={idx}
                       onClick={() => setSelectedTxn(txn)}
                       className={`hover:bg-dark-border/25 cursor-pointer transition ${
                         selectedTxn?.transaction_id === txn.transaction_id ? "bg-guard-orangeLight/40 border-l-4 border-l-guard-orange" : ""
-                      } ${txn.status === "SUSPENDED" ? "bg-amber-50/40" : ""}`}
+                      } ${txn.status === "SUSPENDED" ? "bg-guard-orangeLight/60" : ""} ${txn.status === "PENDING" ? "bg-brand-info/5" : ""}`}
                     >
                       <td className="px-3 py-3.5 font-mono text-xs font-semibold text-dark-text">
                         {txn.transaction_id}
@@ -210,22 +295,28 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
                   <span className="bg-guard-orangeLight text-guard-orange border border-guard-orange/30 rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
                     <PauseCircle className="h-3.5 w-3.5" /> SUSPENDED
                   </span>
+                ) : selectedTxn.status === "PENDING" ? (
+                  <span className="bg-brand-info/10 text-brand-info border border-brand-info/30 rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
+                    <AlertCircle className="h-3.5 w-3.5" /> PENDING
+                  </span>
                 ) : selectedTxn.status === "BLOCKED" ? (
-                  <span className="bg-brand-danger/10 text-brand-danger border border-gray-200 rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
+                  <span className="bg-brand-danger/10 text-brand-danger border border-gray-200 dark:border-dark-border rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
                     <ShieldAlert className="h-3.5 w-3.5" /> FRAUD BLOCK
                   </span>
                 ) : (
-                  <span className="bg-brand-success/10 text-brand-success border border-gray-200 rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
+                  <span className="bg-brand-success/10 text-brand-success border border-gray-200 dark:border-dark-border rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
                     <ShieldCheck className="h-3.5 w-3.5" /> PASS
                   </span>
                 )}
               </div>
 
-              {/* Suspended: admin resolve panel */}
-              {selectedTxn.status === "SUSPENDED" && (
+              {/* Suspended/Pending: admin resolve panel, or analyst suspend action */}
+              {(selectedTxn.status === "SUSPENDED" || selectedTxn.status === "PENDING") && (
                 <div className="bg-guard-orangeLight border border-guard-orange/30 rounded-lg p-4 space-y-3">
                   <p className="text-xs text-guard-orange font-semibold leading-relaxed">
-                    This transaction is held pending review. Funds will not move until an admin approves or blocks it.
+                    {selectedTxn.status === "PENDING"
+                      ? "This transaction is medium risk and awaiting action. An analyst can flag it for review, or an admin can resolve it directly."
+                      : "This transaction is held pending review. Funds will not move until an admin approves or blocks it."}
                   </p>
                   {isAdmin ? (
                     <div className="flex gap-2">
@@ -244,6 +335,15 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
                         Block Transaction
                       </button>
                     </div>
+                  ) : selectedTxn.status === "PENDING" ? (
+                    <button
+                      disabled={claimingId === selectedTxn.transaction_id}
+                      onClick={() => handleSuspend(selectedTxn.transaction_id)}
+                      className="w-full bg-guard-orange text-white text-xs font-bold py-2 rounded-lg hover:bg-guard-orange/90 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                    >
+                      {claimingId === selectedTxn.transaction_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PauseCircle className="h-3.5 w-3.5" />}
+                      {claimingId === selectedTxn.transaction_id ? "Suspending..." : "Suspend Transaction"}
+                    </button>
                   ) : (
                     <p className="text-[11px] text-guard-orange/80 font-medium italic">
                       Only an admin account can resolve this. Sign in with an admin email to take action.
@@ -252,8 +352,20 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
                 </div>
               )}
 
+              {selectedTxn.claimed_by && (
+                <div className="text-[11px] text-guard-orange bg-guard-orangeLight border border-guard-orange/30 rounded-lg px-3 py-2 flex items-center gap-2">
+                  <User className="h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    Flagged by <span className="font-semibold">{selectedTxn.claimed_by}</span>
+                    {selectedTxn.claimed_at && (
+                      <> at {new Date(selectedTxn.claimed_at).toLocaleString()}</>
+                    )}
+                  </span>
+                </div>
+              )}
+
               {selectedTxn.resolved_by && (
-                <div className="text-[11px] text-dark-muted bg-gray-50 border border-dark-border rounded-lg px-3 py-2">
+                <div className="text-[11px] text-dark-muted bg-gray-50 dark:bg-white/5 border border-dark-border rounded-lg px-3 py-2">
                   Resolved by <span className="font-semibold text-dark-text">{selectedTxn.resolved_by}</span>
                   {selectedTxn.resolved_at && (
                     <> at {new Date(selectedTxn.resolved_at).toLocaleString()}</>
@@ -263,11 +375,11 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
 
               {/* Stats Grid */}
               <div className="grid grid-cols-2 gap-4">
-                <div className="bg-gray-50/50 border border-dark-border p-3 rounded-lg">
+                <div className="bg-gray-50/50 dark:bg-white/5 border border-dark-border p-3 rounded-lg">
                   <span className="text-[10px] text-dark-muted block uppercase">Amount (NGN)</span>
                   <span className="text-lg font-bold text-dark-text">₦{selectedTxn.amount.toLocaleString('en-NG')}</span>
                 </div>
-                <div className="bg-gray-50/50 border border-dark-border p-3 rounded-lg">
+                <div className="bg-gray-50/50 dark:bg-white/5 border border-dark-border p-3 rounded-lg">
                   <span className="text-[10px] text-dark-muted block uppercase">Risk Probability</span>
                   <span className="text-lg font-bold text-dark-text">
                     {selectedTxn.fraud_probability !== null ? `${(selectedTxn.fraud_probability * 100).toFixed(1)}%` : "0.0%"}
@@ -297,7 +409,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
                   <Activity className="h-4.5 w-4.5 text-guard-orange shrink-0 mt-0.5" />
                   <div>
                     <span className="text-dark-muted block font-semibold">Payment Channel / Method</span>
-                    <span className="text-dark-text font-bold uppercase text-[10px] bg-gray-100 border border-gray-200 px-2 py-0.5 rounded tracking-wider">
+                    <span className="text-dark-text font-bold uppercase text-[10px] bg-gray-100 dark:bg-white/10 border border-gray-200 dark:border-dark-border px-2 py-0.5 rounded tracking-wider">
                       {selectedTxn.payment_method || "USSD"}
                     </span>
                   </div>

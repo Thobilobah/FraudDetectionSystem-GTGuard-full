@@ -69,5 +69,5 @@ class PredictionResponse(BaseModel):
     risk_level: str = Field(..., description="Risk level (LOW, MEDIUM, HIGH)")
     triggered_rules: list[TriggeredRule] = Field(default=[], description="List of triggered rules")
     feature_signals: dict = Field(default={}, description="Feature values calculated for explanation")
-    status: str | None = Field(default=None, description="APPROVED, BLOCKED, or SUSPENDED")
+    status: str | None = Field(default=None, description="APPROVED, BLOCKED, PENDING, or SUSPENDED")
     transaction_id: str | None = Field(default=None, description="ID of the saved transaction record")

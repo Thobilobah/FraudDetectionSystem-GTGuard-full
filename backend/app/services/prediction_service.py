@@ -97,22 +97,18 @@ class PredictionService:
                         "confusion_matrix": json.loads(best_row["Confusion Matrix"]),
                         "training_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
-
-                    # Persisting the switch (metadata JSON + CSV copy) is
-                    # best-effort: serverless read-only filesystems (Vercel)
-                    # will refuse these writes, and the in-memory switch
-                    # above must still complete.
-                    try:
-                        metadata_path = os.path.abspath(settings.METADATA_PATH)
-                        with open(metadata_path, "w") as f:
-                            json.dump(self.metadata, f, indent=4)
-                        feat_fn = "feature_importance_" + model_name.lower().replace(" ", "_") + ".csv"
-                        shutil.copy(
-                            os.path.join(reports_dir, feat_fn),
-                            os.path.join(reports_dir, "feature_importance.csv")
-                        )
-                    except Exception as e:
-                        print(f"Could not persist model switch to disk (expected on serverless): {e}")
+                    
+                    # Persist metadata to JSON
+                    metadata_path = os.path.abspath(settings.METADATA_PATH)
+                    with open(metadata_path, "w") as f:
+                        json.dump(self.metadata, f, indent=4)
+                        
+                    # Copy matching feature importance CSV
+                    feat_fn = "feature_importance_" + model_name.lower().replace(" ", "_") + ".csv"
+                    shutil.copy(
+                        os.path.join(reports_dir, feat_fn),
+                        os.path.join(reports_dir, "feature_importance.csv")
+                    )
             except Exception as e:
                 print(f"Error compiling active metadata switch: {e}")
                 

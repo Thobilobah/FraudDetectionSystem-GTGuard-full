@@ -149,14 +149,14 @@ class RuleEngine:
                 "message": f"Detected {id_amt_24h} transactions of identical amount within a 24-hour window."
             })
             
-        # Rule 15: CREDIT_CARD_LIMIT_ANOMALY
+        # Rule 15: DEBIT_CARD_LIMIT_ANOMALY
         pay_method = features.get("payment_method", "UPI")
-        if pay_method == "Credit Card" and amount > 40000:
+        if pay_method == "Debit Card" and amount > 40000:
             triggered.append({
-                "rule_id": "CREDIT_CARD_LIMIT_ANOMALY",
-                "rule_name": "Credit Card Single-Tap Limit Anomaly",
+                "rule_id": "DEBIT_CARD_LIMIT_ANOMALY",
+                "rule_name": "Debit Card Single-Tap Limit Anomaly",
                 "severity": "WARNING",
-                "message": f"Credit Card single transaction of ₦{amount:,.2f} exceeds typical single-tap security limits."
+                "message": f"Debit Card single transaction of ₦{amount:,.2f} exceeds typical single-tap security limits."
             })
             
         # Rule 16: NET_BANKING_ANOMALY

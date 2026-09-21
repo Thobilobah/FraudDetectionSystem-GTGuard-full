@@ -141,17 +141,22 @@ class TransactionRepository:
                     payment_method TEXT DEFAULT 'USSD',
                     status TEXT DEFAULT 'APPROVED',
                     resolved_by TEXT,
-                    resolved_at TEXT
+                    resolved_at TEXT,
+                    claimed_by TEXT,
+                    claimed_at TEXT
                 )
             """)
 
             # Migration check: add any columns that don't exist yet (payment_method,
-            # status, resolved_by, resolved_at) - safe to re-run on an existing DB.
+            # status, resolved_by, resolved_at, claimed_by, claimed_at) - safe to
+            # re-run on an existing DB.
             for col_name, col_def in [
                 ("payment_method", "TEXT DEFAULT 'USSD'"),
                 ("status", "TEXT DEFAULT 'APPROVED'"),
                 ("resolved_by", "TEXT"),
                 ("resolved_at", "TEXT"),
+                ("claimed_by", "TEXT"),
+                ("claimed_at", "TEXT"),
             ]:
                 col_check = conn.execute("""
                     SELECT column_name FROM information_schema.columns
@@ -405,11 +410,43 @@ class TransactionRepository:
             "payment_method": payment_method,
             "status": status,
             "resolved_by": None,
-            "resolved_at": None
+            "resolved_at": None,
+            "claimed_by": None,
+            "claimed_at": None
         }
 
+    def suspend_transaction(self, txn_id: str, flagged_by_email: str) -> dict:
+        """An analyst flags a PENDING (medium-risk) transaction, which does two
+        things in one atomic action: moves its status to SUSPENDED, and records
+        that analyst's email as who flagged it - so it's visible to everyone
+        else (including on a different login/device) that this one is now
+        being handled, and by whom. Returns a dict with an 'error' key on
+        failure so the route can translate it into the right HTTP status, or
+        the updated row on success."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM transactions WHERE transaction_id = ?", (txn_id,))
+            row = cursor.fetchone()
+            if not row:
+                return {"error": "not_found"}
+
+            existing = dict(row)
+            if existing.get("status") != "PENDING":
+                return {"error": "not_pending"}
+
+            claimed_at = datetime.now().isoformat()
+            conn.execute("""
+                UPDATE transactions
+                SET status = 'SUSPENDED', claimed_by = ?, claimed_at = ?
+                WHERE transaction_id = ?
+            """, (flagged_by_email, claimed_at, txn_id))
+            conn.commit()
+
+            cursor = conn.execute("SELECT * FROM transactions WHERE transaction_id = ?", (txn_id,))
+            updated = cursor.fetchone()
+            return dict(updated) if updated else {"error": "not_found"}
+
     def resolve_transaction(self, txn_id: str, decision: str, resolved_by: str) -> dict | None:
-        """Admin resolves a SUSPENDED transaction to APPROVED or BLOCKED."""
+        """Admin resolves a PENDING or SUSPENDED transaction to APPROVED or BLOCKED."""
         resolved_at = datetime.now().isoformat()
         with self.get_connection() as conn:
             cursor = conn.execute("SELECT * FROM transactions WHERE transaction_id = ?", (txn_id,))
@@ -510,6 +547,19 @@ class TransactionRepository:
                 ORDER BY created_at DESC
                 LIMIT ?
             """, (limit,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_transactions_in_range(self, start_date: str, end_date: str) -> list:
+        """Used by the admin CSV report export. start_date/end_date are ISO
+        date strings (YYYY-MM-DD); end_date is treated as inclusive through
+        the end of that day."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM transactions
+                WHERE created_at::date >= ?::date
+                  AND created_at::date <= ?::date
+                ORDER BY created_at DESC
+            """, (start_date, end_date))
             return [dict(row) for row in cursor.fetchall()]
 
     def get_analytics_summary(self) -> dict:

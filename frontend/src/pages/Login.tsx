@@ -36,7 +36,7 @@ export function Login({ onLoginSuccess }: LoginProps) {
   };
 
   return (
-    <div className="min-h-screen w-full flex bg-white">
+    <div className="min-h-screen w-full flex bg-white dark:bg-dark-bg">
       {/* Left brand panel */}
       <div className="hidden lg:flex lg:w-[38%] xl:w-[35%] bg-guard-panel text-white flex-col justify-between px-12 py-14">
         <div className="flex items-center gap-3">
@@ -78,7 +78,7 @@ export function Login({ onLoginSuccess }: LoginProps) {
       </div>
 
       {/* Right form panel */}
-      <div className="flex-1 flex items-center justify-center px-6 py-14 bg-white">
+      <div className="flex-1 flex items-center justify-center px-6 py-14 bg-white dark:bg-dark-bg">
         <div className="w-full max-w-[420px]">
           {/* Mobile-only compact logo */}
           <div className="lg:hidden flex items-center gap-3 mb-8">
@@ -97,7 +97,7 @@ export function Login({ onLoginSuccess }: LoginProps) {
           </p>
 
           {error && (
-            <div className="mb-5 flex items-start gap-2.5 rounded-xl bg-red-50 border border-red-200 px-4 py-3">
+            <div className="mb-5 flex items-start gap-2.5 rounded-xl bg-red-50 dark:bg-brand-danger/10 border border-red-200 dark:border-brand-danger/30 px-4 py-3">
               <AlertCircle className="h-4 w-4 text-brand-danger shrink-0 mt-0.5" />
               <span className="text-sm text-brand-danger font-medium">{error}</span>
             </div>
@@ -109,14 +109,14 @@ export function Login({ onLoginSuccess }: LoginProps) {
                 Email Address
               </label>
               <div className="relative">
-                <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 dark:text-dark-muted" />
                 <input
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@gtbank.com"
                   autoComplete="email"
-                  className="w-full pl-10 pr-4 py-3.5 rounded-xl bg-gray-50 border border-dark-border text-sm text-dark-text placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-guard-orange/40 focus:border-guard-orange transition"
+                  className="w-full pl-10 pr-4 py-3.5 rounded-xl bg-gray-50 dark:bg-white/5 border border-dark-border text-sm text-dark-text placeholder:text-gray-400 dark:placeholder:text-dark-muted focus:outline-none focus:ring-2 focus:ring-guard-orange/40 focus:border-guard-orange transition"
                 />
               </div>
             </div>
@@ -133,19 +133,19 @@ export function Login({ onLoginSuccess }: LoginProps) {
                 </button>
               </div>
               <div className="relative">
-                <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 dark:text-dark-muted" />
                 <input
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••••"
                   autoComplete="current-password"
-                  className="w-full pl-10 pr-11 py-3.5 rounded-xl bg-gray-50 border border-dark-border text-sm text-dark-text placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-guard-orange/40 focus:border-guard-orange transition"
+                  className="w-full pl-10 pr-11 py-3.5 rounded-xl bg-gray-50 dark:bg-white/5 border border-dark-border text-sm text-dark-text placeholder:text-gray-400 dark:placeholder:text-dark-muted focus:outline-none focus:ring-2 focus:ring-guard-orange/40 focus:border-guard-orange transition"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword((s) => !s)}
-                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-dark-text"
+                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400 dark:text-dark-muted hover:text-dark-text"
                   tabIndex={-1}
                 >
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -182,25 +182,25 @@ export function Login({ onLoginSuccess }: LoginProps) {
 
           <div className="flex items-center gap-3 my-6">
             <div className="h-px flex-1 bg-dark-border" />
-            <span className="text-xs font-bold text-gray-400">OR</span>
+            <span className="text-xs font-bold text-gray-400 dark:text-dark-muted">OR</span>
             <div className="h-px flex-1 bg-dark-border" />
           </div>
 
           <button
             type="button"
-            className="w-full py-3.5 rounded-xl border border-dark-border text-sm font-semibold text-dark-text hover:bg-gray-50 transition"
+            className="w-full py-3.5 rounded-xl border border-dark-border text-sm font-semibold text-dark-text hover:bg-gray-50 dark:hover:bg-white/5 transition"
           >
             Continue with Company SSO
           </button>
 
-          <div className="mt-6 flex items-start gap-2.5 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3.5">
+          <div className="mt-6 flex items-start gap-2.5 rounded-xl bg-amber-50 dark:bg-brand-warning/10 border border-amber-200 dark:border-brand-warning/30 px-4 py-3.5">
             <span className="h-2 w-2 rounded-full bg-brand-warning mt-1.5 shrink-0" />
             <span className="text-sm font-semibold text-amber-700 leading-snug">
               Demo mode enabled — use any email and password to continue.
             </span>
           </div>
 
-          <div className="flex items-center justify-center gap-2 mt-7 text-xs font-medium text-gray-400">
+          <div className="flex items-center justify-center gap-2 mt-7 text-xs font-medium text-gray-400 dark:text-dark-muted">
             <Shield className="h-3.5 w-3.5" /> Powered by GTCO AI
           </div>
         </div>

@@ -12,11 +12,13 @@ router = APIRouter()
 
 
 def status_from_risk_level(risk_level: str) -> str:
-    """LOW -> auto-approved, HIGH -> auto-blocked, MEDIUM -> held for admin review."""
+    """LOW -> auto-approved, HIGH -> auto-blocked, MEDIUM -> PENDING (sits
+    visible to analysts until one of them actually flags/suspends it -
+    suspension is now a deliberate analyst action, not automatic)."""
     if risk_level == "HIGH":
         return "BLOCKED"
     if risk_level == "MEDIUM":
-        return "SUSPENDED"
+        return "PENDING"
     return "APPROVED"
 
 
@@ -90,7 +92,7 @@ def predict_raw_features(features: FeatureVector):
             if amt > 25000:
                 pay_method = "Net Banking"
             elif txn_t in ["Bill Payment", "Merchant"]:
-                pay_method = "Credit Card"
+                pay_method = "Debit Card"
             elif txn_t == "Recharge":
                 pay_method = "Wallet"
 
@@ -246,7 +248,7 @@ def generate_demo_transaction(scenario: str = Query("normal", enum=["normal", "s
                 # Location is moderately far (30-80 km)
                 location_latitude = round(last_lat + random.uniform(0.3, 0.8), 4)
                 location_longitude = round(last_lon + random.uniform(0.3, 0.8), 4)
-                payment_method = random.choice(["Credit Card", "Net Banking", "IMPS", "Wallet"])
+                payment_method = random.choice(["Debit Card", "Net Banking", "Mobile Transfer", "Wallet"])
 
             else:  # high_risk
                 target_level = "HIGH"
@@ -256,7 +258,7 @@ def generate_demo_transaction(scenario: str = Query("normal", enum=["normal", "s
                 # Location is extremely far (impossible travel: 600+ km away)
                 location_latitude = round(last_lat + random.uniform(6.0, 12.0), 4)
                 location_longitude = round(last_lon + random.uniform(6.0, 12.0), 4)
-                payment_method = random.choice(["Credit Card", "IMPS", "Wallet", "Net Banking"])
+                payment_method = random.choice(["Debit Card", "Mobile Transfer", "Wallet", "Net Banking"])
 
                 # Insert a fake recent transaction at the user's last known
                 # location just 2 minutes ago, so the jump to the far-away

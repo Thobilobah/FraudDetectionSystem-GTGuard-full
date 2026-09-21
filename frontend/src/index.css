@@ -4,10 +4,39 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --color-bg: 243 244 246;        /* #F3F4F6 */
+  --color-card: 255 255 255;      /* #FFFFFF */
+  --color-border: 229 231 235;    /* #E5E7EB */
+  --color-text: 17 24 39;         /* #111827 */
+  --color-muted: 107 114 128;     /* #6B7280 */
+  --color-orange-light: 255 241 238; /* #FFF1EE */
+}
+
+.dark {
+  --color-bg: 11 13 18;           /* #0B0D12 */
+  --color-card: 17 19 26;         /* #11131A */
+  --color-border: 41 44 51;       /* #292C33 */
+  --color-text: 243 244 246;      /* #F3F4F6 */
+  --color-muted: 156 163 175;     /* #9CA3AF */
+  --color-orange-light: 63 32 21; /* deepened orange tint for dark surfaces */
+}
+
 @layer base {
   body {
     @apply bg-dark-bg text-dark-text antialiased;
     font-family: 'Outfit', 'Inter', sans-serif;
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
@@ -28,6 +57,26 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: #4F46E5;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: #11131A;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #292C33;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #FF5A21;
+}
+
+/* Firefox */
+:root {
+  scrollbar-color: #D1D5DB #E5E7EB;
+}
+.dark {
+  scrollbar-color: #292C33 #11131A;
 }
 
 /* Custom Animations */

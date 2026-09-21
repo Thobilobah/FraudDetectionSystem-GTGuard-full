@@ -10,7 +10,7 @@ class TransactionBase(BaseModel):
     device_id: str = Field(..., description="Device fingerprint / ID")
     location_latitude: float = Field(..., description="GPS Latitude")
     location_longitude: float = Field(..., description="GPS Longitude")
-    payment_method: str = Field("USSD", description="Payment channel used (USSD, Credit Card, Debit Card, Net Banking, Wallet, IMPS)")
+    payment_method: str = Field("USSD", description="Payment channel used (USSD, Debit Card, Net Banking, Wallet, Mobile Transfer)")
 
 class TransactionCreate(TransactionBase):
     pass
@@ -23,9 +23,11 @@ class TransactionResponse(TransactionBase):
     risk_level: str | None = None
     triggered_rules: list[dict] = []
     created_at: str
-    status: str | None = None          # APPROVED | BLOCKED | SUSPENDED
+    status: str | None = None          # APPROVED | BLOCKED | PENDING | SUSPENDED
     resolved_by: str | None = None     # admin email who resolved a suspended txn
     resolved_at: str | None = None
+    claimed_by: str | None = None      # email of the analyst who flagged/suspended this txn
+    claimed_at: str | None = None      # when it was flagged
 
 
 class ResolveTransactionRequest(BaseModel):
