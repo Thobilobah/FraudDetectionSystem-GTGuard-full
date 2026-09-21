@@ -37,6 +37,7 @@ export default function App() {
   const [modelComparisons, setModelComparisons] = useState<ModelComparison[]>([]);
   const [featureImportance, setFeatureImportance] = useState<FeatureImportance[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [activatingModel, setActivatingModel] = useState<string | null>(null);
 
   const fetchAllData = async () => {
     try {
@@ -60,11 +61,16 @@ export default function App() {
   };
 
   const handleSelectModel = async (modelName: string) => {
+    setActivatingModel(modelName);
     try {
       await selectActiveModel(modelName);
       await fetchAllData();
+      showToast("success", `${modelName} activated`, "Now serving real-time fraud predictions.");
     } catch (e) {
       console.error("Error switching model:", e);
+      showToast("danger", "Model switch failed", "Check the connection and try again.");
+    } finally {
+      setActivatingModel(null);
     }
   };
 
@@ -136,6 +142,7 @@ export default function App() {
             comparison={modelComparisons}
             featureImportance={featureImportance}
             onSelectModel={handleSelectModel}
+            activatingModel={activatingModel}
           />
         );
       case "history":

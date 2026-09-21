@@ -118,6 +118,31 @@ class TransactionRepository:
         raw_conn = TransactionRepository._pool.getconn()
         return _PGConnection(raw_conn, TransactionRepository._pool)
 
+    def get_setting(self, key: str) -> str | None:
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+                row = cursor.fetchone()
+                return row["value"] if row else None
+        except Exception as e:
+            print(f"Error reading setting '{key}': {e}")
+            return None
+
+    def upsert_setting(self, key: str, value: str) -> bool:
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO app_settings (key, value) VALUES (?, ?)
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                    """,
+                    (key, value),
+                )
+            return True
+        except Exception as e:
+            print(f"Error persisting setting '{key}'={value!r}: {e}")
+            return False
+
     def init_db(self):
         with self.get_connection() as conn:
             # 1. Transactions Table
@@ -205,6 +230,15 @@ class TransactionRepository:
                 CREATE TABLE IF NOT EXISTS location_profiles (
                     location_id TEXT PRIMARY KEY,
                     risk_score REAL
+                )
+            """)
+
+            # 6. Application Settings Table (durable key/value so choices like
+            # the active ML model survive serverless cold starts / redeploys)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
                 )
             """)
 

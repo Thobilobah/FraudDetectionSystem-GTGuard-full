@@ -5,6 +5,7 @@ import pandas as pd
 from backend.app.config import settings
 from datetime import datetime
 from backend.app.services.rule_engine import RuleEngine
+from backend.app.repositories.transaction_repository import db_repo
 
 FEATURES_LIST = [
     "transaction_amount", "transaction_type", "transaction_hour", "day_of_week",
@@ -41,6 +42,22 @@ class PredictionService:
             print(f"Model metadata not found at {metadata_path}.")
             self.metadata = None
 
+        # Durable override: the active model may have been switched via the
+        # /model/select endpoint, which persists the choice in PostgreSQL
+        # (serverless filesystems are read-only so the disk JSON can't change).
+        # Honor that stored choice so cold starts / fresh instances pick the
+        # same model the analyst last activated.
+        try:
+            db_active = db_repo.get_setting("active_model")
+            if db_active and db_active != self.active_model_name:
+                print(f"DB override: using persisted active model '{db_active}'")
+                self.active_model_name = db_active
+                db_meta = self._metadata_from_comparison(db_active)
+                if db_meta:
+                    self.metadata = db_meta
+        except Exception as e:
+            print(f"Error reading active model from DB: {e}")
+
         # Resolve active model path
         fn = self.active_model_name.lower().replace(" ", "_") + ".pkl"
         models_dir = os.path.abspath(os.path.join(os.path.dirname(settings.MODEL_PATH)))
@@ -61,6 +78,39 @@ class PredictionService:
             print(f"Model pipeline not found at {model_path}. Train the model first.")
             self.pipeline = None
 
+    def _metadata_from_comparison(self, model_name: str) -> dict | None:
+        """Reconstruct the standard metadata JSON for a model from the
+        model_comparison.csv report (read-only file). Returns None if the
+        report or the model row is missing."""
+        try:
+            reports_dir = os.path.abspath(settings.REPORTS_DIR)
+            comp_csv = os.path.join(reports_dir, "model_comparison.csv")
+            if not os.path.exists(comp_csv):
+                return None
+            comp_df = pd.read_csv(comp_csv)
+            row = comp_df[comp_df["Model"] == model_name]
+            if row.empty:
+                return None
+            best_row = row.iloc[0]
+            return {
+                "selected_model": model_name,
+                "trained_on": "dataset.csv (Nigerian NIBSS data)",
+                "features_with_no_data": [],
+                "metrics": {
+                    "accuracy": float(best_row["Accuracy"]),
+                    "precision": float(best_row["Precision"]),
+                    "recall": float(best_row["Recall"]),
+                    "f1": float(best_row["F1"]),
+                    "roc_auc": float(best_row["ROC-AUC"]),
+                    "training_time": float(best_row["Training Time (s)"])
+                },
+                "confusion_matrix": json.loads(best_row["Confusion Matrix"]),
+                "training_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+        except Exception as e:
+            print(f"Error building metadata for {model_name}: {e}")
+            return None
+
     def switch_model(self, model_name: str):
         fn = model_name.lower().replace(" ", "_") + ".pkl"
         models_dir = os.path.abspath(os.path.join(os.path.dirname(settings.MODEL_PATH)))
@@ -73,46 +123,42 @@ class PredictionService:
             self.pipeline = pickle.load(f)
             
         self.active_model_name = model_name
-        
-        # Load comparison details to update active metadata
-        import shutil
-        reports_dir = os.path.abspath(settings.REPORTS_DIR)
-        comp_csv = os.path.join(reports_dir, "model_comparison.csv")
-        if os.path.exists(comp_csv):
+
+        # Durable persistence: store the choice in PostgreSQL so every
+        # instance and every cold start honors it (models are baked into the
+        # serverless bundle, so the on-disk metadata JSON stays read-only).
+        if db_repo.upsert_setting("active_model", model_name):
+            print(f"Persisted active model to database: {model_name}")
+        else:
+            print("WARNING: could not persist active model to the database; "
+                  "the switch is in-memory only for this instance.")
+
+        # Rebuild metadata for the newly active model from the comparison
+        # report, then try to write it to disk (best-effort - succeeds
+        # locally, fails harmlessly on the read-only serverless filesystem).
+        meta = self._metadata_from_comparison(model_name)
+        if meta:
+            self.metadata = meta
             try:
-                comp_df = pd.read_csv(comp_csv)
-                row = comp_df[comp_df["Model"] == model_name]
-                if not row.empty:
-                    best_row = row.iloc[0]
-                    self.metadata = {
-                        "selected_model": model_name,
-                        "metrics": {
-                            "accuracy": float(best_row["Accuracy"]),
-                            "precision": float(best_row["Precision"]),
-                            "recall": float(best_row["Recall"]),
-                            "f1": float(best_row["F1"]),
-                            "roc_auc": float(best_row["ROC-AUC"]),
-                            "training_time": float(best_row["Training Time (s)"])
-                        },
-                        "confusion_matrix": json.loads(best_row["Confusion Matrix"]),
-                        "training_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    
-                    # Persist metadata to JSON
-                    metadata_path = os.path.abspath(settings.METADATA_PATH)
-                    with open(metadata_path, "w") as f:
-                        json.dump(self.metadata, f, indent=4)
-                        
-                    # Copy matching feature importance CSV
-                    feat_fn = "feature_importance_" + model_name.lower().replace(" ", "_") + ".csv"
-                    shutil.copy(
-                        os.path.join(reports_dir, feat_fn),
-                        os.path.join(reports_dir, "feature_importance.csv")
-                    )
+                import shutil
+                metadata_path = os.path.abspath(settings.METADATA_PATH)
+                with open(metadata_path, "w") as f:
+                    json.dump(self.metadata, f, indent=4)
+                reports_dir = os.path.abspath(settings.REPORTS_DIR)
+                feat_fn = "feature_importance_" + model_name.lower().replace(" ", "_") + ".csv"
+                src = os.path.join(reports_dir, feat_fn)
+                if os.path.exists(src):
+                    shutil.copy(src, os.path.join(reports_dir, "feature_importance.csv"))
             except Exception as e:
-                print(f"Error compiling active metadata switch: {e}")
-                
+                print(f"Could not persist model switch to disk (expected on serverless): {e}")
+
         print(f"Successfully switched active production model to: {model_name}")
+        return {
+            "status": "ok",
+            "active_model": self.active_model_name,
+            "persisted": True,
+            "metadata": self.metadata
+        }
 
 
     def predict_features(self, features: dict) -> dict:

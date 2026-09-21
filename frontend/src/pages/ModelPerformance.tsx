@@ -9,13 +9,15 @@ interface ModelPerformanceProps {
   comparison: ModelComparison[];
   featureImportance: FeatureImportance[];
   onSelectModel?: (modelName: string) => void;
+  activatingModel?: string | null;
 }
 
 export const ModelPerformance: React.FC<ModelPerformanceProps> = ({ 
   modelMeta, 
   comparison, 
   featureImportance,
-  onSelectModel
+  onSelectModel,
+  activatingModel
 }) => {
   const { theme } = useTheme();
   const gridStroke = theme === "dark" ? "#292C33" : "#E5E7EB";
@@ -171,9 +173,10 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
                         ) : (
                           <button
                             onClick={() => onSelectModel && onSelectModel(row.Model)}
-                            className="bg-guard-orange hover:bg-guard-orange/90 text-white text-xs font-bold px-2.5 py-1 rounded transition hover:scale-[1.05]"
+                            disabled={activatingModel !== null}
+                            className="bg-guard-orange hover:bg-guard-orange/90 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 text-white text-xs font-bold px-2.5 py-1 rounded transition hover:scale-[1.05]"
                           >
-                            Activate
+                            {activatingModel === row.Model ? "Activating..." : "Activate"}
                           </button>
                         )}
                       </td>

@@ -6,6 +6,7 @@ from backend.app.config import settings
 from backend.app.routes import prediction, analytics, razorpay, transactions, auth as auth_routes
 from backend.app.auth import get_current_user
 from backend.app.repositories.transaction_repository import db_repo
+from backend.app.services.prediction_service import prediction_service
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -58,24 +59,35 @@ def health_check():
 @app.get("/model-info")
 def model_info():
     metadata_path = os.path.abspath(settings.METADATA_PATH)
+    metadata = None
     if os.path.exists(metadata_path):
         try:
             with open(metadata_path, "r") as f:
                 metadata = json.load(f)
-            return {
-                "status": "loaded",
-                "metadata": metadata
-            }
         except Exception as e:
             return {
                 "status": "error",
                 "message": f"Error reading metadata: {str(e)}"
             }
-    else:
-        return {
-            "status": "unavailable",
-            "message": "Model pipeline metadata file not found. Run model training first."
-        }
+
+    # Durable override: the /model/select endpoint persists the analyst's
+    # active-model choice in PostgreSQL (serverless disk is read-only), so
+    # report that model rather than the baked-in JSON default.
+    try:
+        db_active = db_repo.get_setting("active_model")
+        if db_active and (metadata is None or metadata.get("selected_model") != db_active):
+            csv_meta = prediction_service._metadata_from_comparison(db_active)
+            if csv_meta:
+                metadata = csv_meta
+    except Exception as e:
+        print(f"Error applying DB model override: {e}")
+
+    if metadata:
+        return {"status": "loaded", "metadata": metadata}
+    return {
+        "status": "unavailable",
+        "message": "Model pipeline metadata file not found. Run model training first."
+    }
 
 @app.get("/feature-explanation")
 def feature_explanation():
