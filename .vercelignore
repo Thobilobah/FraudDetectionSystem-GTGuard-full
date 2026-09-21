@@ -1,5 +1,6 @@
 .git
 .vercel
+.env*
 venv/
 .venv/
 frontend/
