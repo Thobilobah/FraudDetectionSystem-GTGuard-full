@@ -1,0 +1,11 @@
+.git
+.vercel
+venv/
+.venv/
+frontend/
+archive/
+upi_fraudguard_ai_submission/
+start_backend.bat
+start_backend_mac.sh
+start_frontend.bat
+docker-compose.yml

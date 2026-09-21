@@ -97,12 +97,18 @@ class TransactionRepository:
 
     def _ensure_pool(self):
         if TransactionRepository._pool is None:
+            # Pool sizing is env-driven. In serverless (Vercel) each cold
+            # start spins up a fresh instance-threaded pool, so we default
+            # to LAZY connections (minconn=0) instead of eagerly opening 2
+            # sockets against the hosted Postgres per instance.
+            minconn = int(os.getenv("DB_POOL_MIN", "0"))
+            maxconn = int(os.getenv("DB_POOL_MAX", "20"))
             TransactionRepository._pool = pg_pool.ThreadedConnectionPool(
-                minconn=2,
-                maxconn=20,
+                minconn=minconn,
+                maxconn=maxconn,
                 dsn=self.database_url,
             )
-            print(f"PostgreSQL connection pool created (2-20 connections) for {self._safe_dsn()}")
+            print(f"PostgreSQL connection pool created ({minconn}-{maxconn} connections) for {self._safe_dsn()}")
 
     def _safe_dsn(self) -> str:
         # Hide credentials when logging the DSN
