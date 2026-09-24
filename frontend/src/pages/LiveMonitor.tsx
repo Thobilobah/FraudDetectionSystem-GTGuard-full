@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import type { Transaction } from "../types";
 import { resolveTransaction, suspendTransaction, getStoredUser, getTransactionsPage } from "../services/api";
-import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight } from "lucide-react";
+import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 
 interface LiveMonitorProps {
@@ -27,6 +27,10 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   const [total, setTotal] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Search is applied explicitly (button or Enter), not per keystroke. The
+  // backend matches transaction_id, user_id or beneficiary_id.
+  const [searchTerm, setSearchTerm] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState("");
   const firstLoadDone = useRef(false);
   const currentUser = getStoredUser();
   const isAdmin = currentUser?.role === "admin";
@@ -37,19 +41,20 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
     const data = await getTransactionsPage({
       limit: pageSize,
       offset: page * pageSize,
+      search: appliedSearch,
       sort: "desc",
     });
     setRows(data.items);
     setTotal(data.total);
   };
 
-  // Initial load + page/page-size changes: show the spinner and snap back to
-  // the last valid page if a filter/page-size change empties the current one.
+  // Initial load + page/page-size/search changes: show the spinner and snap
+  // back to the last valid page if a change empties the current one.
   useEffect(() => {
     let cancelled = false;
     setLoadError(null);
     setIsLoading(true);
-    getTransactionsPage({ limit: pageSize, offset: page * pageSize, sort: "desc" })
+    getTransactionsPage({ limit: pageSize, offset: page * pageSize, search: appliedSearch, sort: "desc" })
       .then((data) => {
         if (cancelled) return;
         setRows(data.items);
@@ -70,7 +75,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
     return () => {
       cancelled = true;
     };
-  }, [page, pageSize]);
+  }, [page, pageSize, appliedSearch]);
 
   // Silent auto-refresh so the stream keeps rolling in while you stay on it.
   useEffect(() => {
@@ -78,7 +83,12 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
       reloadCurrentPage().catch(() => {});
     }, 10000);
     return () => clearInterval(id);
-  }, [page, pageSize]);
+  }, [page, pageSize, appliedSearch]);
+
+  const applySearch = () => {
+    setAppliedSearch(searchTerm.trim());
+    setPage(0);
+  };
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -286,11 +296,48 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Logs Table */}
         <div className="bg-dark-card border border-dark-border rounded-xl shadow-glow-brand overflow-hidden lg:col-span-2">
-          <div className="px-5 py-4 border-b border-dark-border flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-dark-text font-mono">Surveillance Stream</h3>
-            <span className="text-[10px] bg-guard-orangeLight text-guard-orange font-bold px-2.5 py-1 rounded-full uppercase tracking-wider">
-              {total.toLocaleString()} Total Stream
-            </span>
+          <div className="px-5 py-4 border-b border-dark-border flex flex-col xl:flex-row items-start xl:items-center justify-between gap-3">
+            <div className="flex items-center justify-between w-full xl:w-auto gap-3">
+              <h3 className="text-lg font-semibold text-dark-text font-mono">Surveillance Stream</h3>
+              <span className="text-[10px] bg-guard-orangeLight text-guard-orange font-bold px-2.5 py-1 rounded-full uppercase tracking-wider">
+                {total.toLocaleString()} Total
+              </span>
+            </div>
+            <form
+              onSubmit={(e) => { e.preventDefault(); applySearch(); }}
+              className="flex items-center gap-2 w-full xl:w-auto"
+            >
+              <div className="relative flex-1 xl:w-72">
+                <span className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-dark-muted">
+                  <Search className="h-4 w-4" />
+                </span>
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Search by transaction or customer ID..."
+                  className="w-full bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg pl-9 pr-3 py-2 focus:border-guard-orange focus:outline-none placeholder:text-dark-muted/60"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="inline-flex items-center gap-1.5 text-xs font-bold px-3.5 py-2 rounded-lg bg-guard-orange text-white hover:bg-guard-orange/90 transition disabled:opacity-50 whitespace-nowrap"
+              >
+                {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                Search
+              </button>
+              {appliedSearch && (
+                <button
+                  type="button"
+                  onClick={() => { setSearchTerm(""); setAppliedSearch(""); setPage(0); }}
+                  className="text-[11px] font-bold px-2 py-2 rounded-lg bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text hover:border-guard-orange transition whitespace-nowrap"
+                  title="Clear search"
+                >
+                  Clear
+                </button>
+              )}
+            </form>
           </div>
           
           <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
@@ -352,9 +399,19 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
               </table>
             ) : (
               <div className="py-20 text-center text-dark-muted flex flex-col items-center justify-center gap-3">
-                <RefreshCw className="h-8 w-8 animate-pulse text-dark-border" />
-                <p className="text-sm">No transaction events recorded yet.</p>
-                <p className="text-xs text-dark-muted">Simulate a transaction or capture a webhook to stream events here.</p>
+                {appliedSearch ? (
+                  <>
+                    <Search className="h-8 w-8 text-dark-border" />
+                    <p className="text-sm">No transactions match "{appliedSearch}".</p>
+                    <p className="text-xs text-dark-muted">Try a full transaction ID or customer account ID.</p>
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="h-8 w-8 animate-pulse text-dark-border" />
+                    <p className="text-sm">No transaction events recorded yet.</p>
+                    <p className="text-xs text-dark-muted">Simulate a transaction or capture a webhook to stream events here.</p>
+                  </>
+                )}
               </div>
             )}
           </div>
