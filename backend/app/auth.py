@@ -1,17 +1,12 @@
 """
 Lightweight JWT authentication for the GT GUARD / FraudGuard AI dashboard.
 
-Runs in the same "Demo Mode" spirit as the rest of this system's third-party
-integrations (Razorpay, GTCO webhooks): any well-formed email + non-empty
-password is accepted at /auth/login and issued a real, signed JWT. That token
-is then required on every protected API route via `get_current_user`, so the
-login screen genuinely gates access to the dashboard's data - it isn't just a
-cosmetic frontend check.
-
-To move this to production, replace the acceptance logic in
-routes/auth.py::login with a real credential check against a users table
-(hashed passwords, etc.) - the token issuing/verification plumbing below
-does not need to change.
+Only the fixed analyst/admin accounts in services/credential_store.py are
+accepted at /auth/login (validated against hashed credentials); every other
+email/password combination is rejected with a generic 401. Successful logins
+are issued a real, signed JWT that is required on every protected API route
+via `get_current_user`, so the login screen genuinely gates access to the
+dashboard's data - it isn't just a cosmetic frontend check.
 """
 
 import os
@@ -22,14 +17,6 @@ from fastapi import Header, HTTPException, Depends
 SECRET_KEY = os.getenv("AUTH_SECRET_KEY", "fraudguard-demo-secret-change-in-production")
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_HOURS = 24
-
-
-def determine_role(email: str) -> str:
-    """Demo-mode role assignment: any email containing 'admin' is treated as
-    an admin account (can resolve suspended transactions). Everyone else is
-    a regular analyst (view-only on suspended transactions). Swap this for a
-    real roles table lookup in production."""
-    return "admin" if "admin" in email.lower() else "analyst"
 
 
 def create_access_token(email: str, role: str) -> str:

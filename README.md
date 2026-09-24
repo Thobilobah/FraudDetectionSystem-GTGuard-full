@@ -175,7 +175,11 @@ The dashboard now matches the GT GUARD Figma designs: orange/dark brand system, 
 - **HIGH** risk -> `status: BLOCKED` (auto-rejected)
 - **MEDIUM** risk -> `status: SUSPENDED` - held, *not* auto-approved, until a human resolves it
 
-**Roles** (demo mode, same pattern as the rest of the app): any email containing `"admin"` (e.g. `admin@gtbank.com`) is treated as an **admin**; every other email is an **analyst**. This is issued as a `role` claim inside the JWT from `/auth/login` - see `backend/app/auth.py::determine_role`.
+**Roles**: login is restricted to a fixed allowlist in `backend/app/services/credential_store.py` (SHA-256 hashed passwords):
+- **Analysts** (password `12345`): `peace@gmail.com`, `jane@gmail.com`, `esther@gmail.com`, `pelumi@gmail.com`, `tobi@gmail.com`
+- **Admins** (password `admin`): `admin@gmail.com`, `sup.admin@gmail.com`
+
+Only these accounts can sign in at `/auth/login`; anything else gets a `401`. The role is issued as a `role` claim inside the JWT.
 
 - **Analyst** accounts can see a Suspended transaction (a "Suspend" badge) but cannot act on it.
 - **Admin** accounts see inline **Approve** / **Block** buttons directly in the Live Monitor table and in the transaction detail panel.

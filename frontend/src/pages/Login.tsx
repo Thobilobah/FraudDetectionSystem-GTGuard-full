@@ -193,10 +193,15 @@ export function Login({ onLoginSuccess }: LoginProps) {
             Continue with Company SSO
           </button>
 
-          <div className="mt-6 flex items-start gap-2.5 rounded-xl bg-amber-50 dark:bg-brand-warning/10 border border-amber-200 dark:border-brand-warning/30 px-4 py-3.5">
-            <span className="h-2 w-2 rounded-full bg-brand-warning mt-1.5 shrink-0" />
-            <span className="text-sm font-semibold text-amber-700 leading-snug">
-              Demo mode enabled — use any email and password to continue.
+          <div className="mt-6 flex flex-col items-start gap-2 rounded-xl bg-amber-50 dark:bg-brand-warning/10 border border-amber-200 dark:border-brand-warning/30 px-4 py-3.5">
+            <div className="flex items-start gap-2.5">
+              <span className="h-2 w-2 rounded-full bg-brand-warning mt-1.5 shrink-0" />
+              <span className="text-sm font-semibold text-amber-700 leading-snug">
+                Authorized accounts only — analysts use password 12345, admins use admin.
+              </span>
+            </div>
+            <span className="text-xs text-amber-600 dark:text-brand-warning/80 ml-4.5 leading-snug block">
+              Analyst: peace@gmail.com · Admin: admin@gmail.com
             </span>
           </div>
 
