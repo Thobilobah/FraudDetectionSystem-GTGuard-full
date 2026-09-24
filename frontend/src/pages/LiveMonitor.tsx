@@ -296,42 +296,42 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Logs Table */}
         <div className="bg-dark-card border border-dark-border rounded-xl shadow-glow-brand overflow-hidden lg:col-span-2">
-          <div className="px-5 py-4 border-b border-dark-border flex flex-col xl:flex-row items-start xl:items-center justify-between gap-3">
-            <div className="flex items-center justify-between w-full xl:w-auto gap-3">
-              <h3 className="text-lg font-semibold text-dark-text font-mono">Surveillance Stream</h3>
-              <span className="text-[10px] bg-guard-orangeLight text-guard-orange font-bold px-2.5 py-1 rounded-full uppercase tracking-wider">
+          <div className="px-5 py-3.5 border-b border-dark-border flex items-center justify-between gap-3 flex-wrap lg:flex-nowrap">
+            <div className="flex items-center gap-3 shrink-0">
+              <h3 className="text-base font-semibold text-dark-text font-mono whitespace-nowrap">Surveillance Stream</h3>
+              <span className="text-[10px] bg-guard-orangeLight text-guard-orange font-bold px-2 py-0.5 rounded-full uppercase tracking-wider whitespace-nowrap">
                 {total.toLocaleString()} Total
               </span>
             </div>
             <form
               onSubmit={(e) => { e.preventDefault(); applySearch(); }}
-              className="flex items-center gap-2 w-full xl:w-auto"
+              className="flex items-center gap-1.5 w-full lg:w-auto"
             >
-              <div className="relative flex-1 xl:w-72">
-                <span className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-dark-muted">
-                  <Search className="h-4 w-4" />
+              <div className="relative flex-1 min-w-0 lg:flex-initial lg:w-44 xl:w-52">
+                <span className="absolute inset-y-0 left-0 flex items-center pl-2.5 pointer-events-none text-dark-muted">
+                  <Search className="h-3.5 w-3.5" />
                 </span>
                 <input
                   type="text"
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="Search by transaction or customer ID..."
-                  className="w-full bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg pl-9 pr-3 py-2 focus:border-guard-orange focus:outline-none placeholder:text-dark-muted/60"
+                  placeholder="Search transaction or customer ID..."
+                  className="w-full bg-dark-bg border border-dark-border text-dark-text text-xs rounded-md pl-8 pr-2.5 py-1.5 focus:border-guard-orange focus:outline-none placeholder:text-dark-muted/60"
                 />
               </div>
               <button
                 type="submit"
                 disabled={isLoading}
-                className="inline-flex items-center gap-1.5 text-xs font-bold px-3.5 py-2 rounded-lg bg-guard-orange text-white hover:bg-guard-orange/90 transition disabled:opacity-50 whitespace-nowrap"
+                className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1.5 rounded-md bg-guard-orange text-white hover:bg-guard-orange/90 transition disabled:opacity-50 whitespace-nowrap"
               >
-                {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                {isLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
                 Search
               </button>
               {appliedSearch && (
                 <button
                   type="button"
                   onClick={() => { setSearchTerm(""); setAppliedSearch(""); setPage(0); }}
-                  className="text-[11px] font-bold px-2 py-2 rounded-lg bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text hover:border-guard-orange transition whitespace-nowrap"
+                  className="text-[11px] font-bold px-2 py-1.5 rounded-md bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text hover:border-guard-orange transition whitespace-nowrap"
                   title="Clear search"
                 >
                   Clear
