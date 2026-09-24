@@ -11,22 +11,32 @@ concurrency:
 
 jobs:
   backend:
-    if: ${{ secrets.VERCEL_TOKEN != '' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Deploy API to Vercel (gtguard-api)
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        run: npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::warning::VERCEL_TOKEN secret is not set; skipping API deploy (add it under repo Settings > Secrets > Actions)."
+            exit 0
+          fi
+          npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
 
   dashboard:
-    if: ${{ secrets.VERCEL_TOKEN != '' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Deploy dashboard to Vercel (gtguard-dashboard)
         working-directory: frontend
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        run: npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::warning::VERCEL_TOKEN secret is not set; skipping dashboard deploy."
+            exit 0
+          fi
+          npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
