@@ -134,7 +134,10 @@ export default function App() {
           />
         );
       case "monitor":
-        return <LiveMonitor transactions={transactions} onRefresh={fetchAllData} />;
+        // LiveMonitor paginates the ledger server-side itself; it no longer
+        // renders the shared poll cache. onRefresh keeps the dashboard's
+        // analytics + health fresh after local actions.
+        return <LiveMonitor onRefresh={fetchAllData} />;
       case "analyzer":
         return <TransactionAnalyzer />;
       case "performance":

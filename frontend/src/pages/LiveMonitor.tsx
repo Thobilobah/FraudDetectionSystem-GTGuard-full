@@ -1,28 +1,93 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import type { Transaction } from "../types";
-import { resolveTransaction, suspendTransaction, getStoredUser } from "../services/api";
-import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User } from "lucide-react";
+import { resolveTransaction, suspendTransaction, getStoredUser, getTransactionsPage } from "../services/api";
+import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 
 interface LiveMonitorProps {
-  transactions: Transaction[];
   onRefresh: () => void;
 }
 
-export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefresh }) => {
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
+export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   const { showToast } = useToast();
   const [selectedTxn, setSelectedTxn] = useState<Transaction | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [claimingId, setClaimingId] = useState<string | null>(null);
   const [claimError, setClaimError] = useState<string | null>(null);
+  // Server-side pagination of the ledger, mirroring TransactionHistory. The
+  // monitor no longer renders the shared 100-row poll cache; it fetches only
+  // the active page (newest-first) and keeps refreshing it silently on a 10s
+  // cadence so new events still roll in "live".
+  const [page, setPage] = useState(0); // zero-based
+  const [pageSize, setPageSize] = useState(25);
+  const [rows, setRows] = useState<Transaction[]>([]);
+  const [total, setTotal] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const firstLoadDone = useRef(false);
   const currentUser = getStoredUser();
   const isAdmin = currentUser?.role === "admin";
 
+  // Re-fetch the active page without flipping the loading flag, so periodic
+  // refreshes don't dim the table. Errors keep the previous rows on screen.
+  const reloadCurrentPage = async () => {
+    const data = await getTransactionsPage({
+      limit: pageSize,
+      offset: page * pageSize,
+      sort: "desc",
+    });
+    setRows(data.items);
+    setTotal(data.total);
+  };
+
+  // Initial load + page/page-size changes: show the spinner and snap back to
+  // the last valid page if a filter/page-size change empties the current one.
+  useEffect(() => {
+    let cancelled = false;
+    setLoadError(null);
+    setIsLoading(true);
+    getTransactionsPage({ limit: pageSize, offset: page * pageSize, sort: "desc" })
+      .then((data) => {
+        if (cancelled) return;
+        setRows(data.items);
+        setTotal(data.total);
+        if (data.items.length === 0 && data.total > 0 && page > 0) {
+          setPage(Math.max(0, Math.ceil(data.total / pageSize) - 1));
+        }
+        firstLoadDone.current = true;
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        console.error("Failed to load monitor stream:", e);
+        setLoadError("Could not load the surveillance stream. Please try again.");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [page, pageSize]);
+
+  // Silent auto-refresh so the stream keeps rolling in while you stay on it.
+  useEffect(() => {
+    const id = setInterval(() => {
+      reloadCurrentPage().catch(() => {});
+    }, 10000);
+    return () => clearInterval(id);
+  }, [page, pageSize]);
+
   const handleRefresh = async () => {
     setIsRefreshing(true);
-    await onRefresh();
-    setIsRefreshing(false);
+    try {
+      await reloadCurrentPage();
+      await onRefresh();
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   const handleResolve = async (txnId: string, decision: "APPROVED" | "BLOCKED") => {
@@ -37,7 +102,8 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
       } else {
         showToast("danger", "Transaction blocked", `${txnId} has been declined and marked BLOCKED.`);
       }
-      await onRefresh();
+      await reloadCurrentPage();
+      void onRefresh();
     } catch (e) {
       console.error("Failed to resolve transaction:", e);
       showToast("danger", "Action failed", "Could not resolve this transaction. Please try again.");
@@ -55,13 +121,15 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
         setSelectedTxn({ ...selectedTxn, ...updated });
       }
       showToast("suspended", "Transaction suspended", `${txnId} is now flagged under your name, pending admin review.`);
-      await onRefresh();
+      await reloadCurrentPage();
+      void onRefresh();
     } catch (e: any) {
       // Most likely a 400: someone else already suspended it a moment before
       // this click landed (it's no longer PENDING). Surface that clearly.
       const detail = e?.response?.data?.detail;
       setClaimError(detail || "Could not suspend this transaction. It may have already been handled.");
-      await onRefresh();
+      await reloadCurrentPage();
+      void onRefresh();
     } finally {
       setClaimingId(null);
     }
@@ -221,12 +289,12 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
           <div className="px-5 py-4 border-b border-dark-border flex items-center justify-between">
             <h3 className="text-lg font-semibold text-dark-text font-mono">Surveillance Stream</h3>
             <span className="text-[10px] bg-guard-orangeLight text-guard-orange font-bold px-2.5 py-1 rounded-full uppercase tracking-wider">
-              {transactions.length} Cached Logs
+              {total.toLocaleString()} Total Stream
             </span>
           </div>
           
           <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
-            {transactions.length > 0 ? (
+            {rows.length > 0 || isLoading ? (
               <table className="w-full text-left border-collapse">
                 <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider sticky top-0">
                   <tr>
@@ -240,11 +308,21 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
-                  {transactions.map((txn, idx) => (
+                  {isLoading && rows.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="px-3 py-12 text-center">
+                        <Loader2 className="h-6 w-6 animate-spin text-guard-orange mx-auto" />
+                        <p className="text-xs text-dark-muted mt-2">Loading stream…</p>
+                      </td>
+                    </tr>
+                  )}
+                  {rows.map((txn, idx) => (
                     <tr
-                      key={idx}
+                      key={txn.transaction_id || idx}
                       onClick={() => setSelectedTxn(txn)}
                       className={`hover:bg-dark-border/25 cursor-pointer transition ${
+                        isLoading ? "opacity-50" : ""
+                      } ${
                         selectedTxn?.transaction_id === txn.transaction_id ? "bg-guard-orangeLight/40 border-l-4 border-l-guard-orange" : ""
                       } ${txn.status === "SUSPENDED" ? "bg-guard-orangeLight/60" : ""} ${txn.status === "PENDING" ? "bg-brand-info/5" : ""}`}
                     >
@@ -279,6 +357,51 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ transactions, onRefres
                 <p className="text-xs text-dark-muted">Simulate a transaction or capture a webhook to stream events here.</p>
               </div>
             )}
+          </div>
+
+          {/* Pagination footer */}
+          <div className="px-4 py-3 border-t border-dark-border flex flex-col sm:flex-row items-center justify-between gap-3">
+            <span className="text-xs text-dark-muted font-semibold">
+              Showing <span className="text-dark-text">{total === 0 ? 0 : page * pageSize + 1}</span>–
+              <span className="text-dark-text">{Math.min(total, page * pageSize + rows.length)}</span> of{" "}
+              <span className="text-dark-text">{total.toLocaleString()}</span>
+              {loadError && <span className="text-brand-danger ml-2">{loadError}</span>}
+            </span>
+
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 text-xs text-dark-muted font-semibold">
+                Rows
+                <select
+                  value={pageSize}
+                  onChange={(e) => { setPageSize(Number(e.target.value)); setPage(0); }}
+                  className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded px-2 py-1 focus:border-guard-orange focus:outline-none"
+                >
+                  {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => setPage(p => Math.max(0, p - 1))}
+                  disabled={page === 0 || isLoading}
+                  className="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1.5 rounded-md bg-dark-bg border border-dark-border text-dark-text hover:border-guard-orange transition disabled:opacity-40"
+                  aria-label="Previous page"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" /> Prev
+                </button>
+                <span className="text-xs text-dark-muted font-mono font-semibold whitespace-nowrap">
+                  Page {page + 1} / {Math.max(1, Math.ceil(total / pageSize))}
+                </span>
+                <button
+                  onClick={() => setPage(p => Math.min(Math.max(1, Math.ceil(total / pageSize)) - 1, p + 1))}
+                  disabled={page >= Math.max(1, Math.ceil(total / pageSize)) - 1 || isLoading}
+                  className="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1.5 rounded-md bg-dark-bg border border-dark-border text-dark-text hover:border-guard-orange transition disabled:opacity-40"
+                  aria-label="Next page"
+                >
+                  Next <ChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 
