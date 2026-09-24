@@ -1,16 +1,14 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import type { Transaction } from "../types";
-import { Search, ShieldAlert, ShieldCheck, Calendar, Filter, ArrowUpDown, PauseCircle, Download, Loader2, AlertCircle } from "lucide-react";
-import { getStoredUser, exportTransactionsCsv } from "../services/api";
+import { Search, ShieldAlert, ShieldCheck, Calendar, Filter, ArrowUpDown, PauseCircle, Download, Loader2, AlertCircle, ChevronLeft, ChevronRight } from "lucide-react";
+import { getStoredUser, exportTransactionsCsv, getTransactionsPage } from "../services/api";
 import { useToast } from "../context/ToastContext";
-
-interface TransactionHistoryProps {
-  transactions: Transaction[];
-}
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
-export const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transactions }) => {
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
+export const TransactionHistory: React.FC = () => {
   const { showToast } = useToast();
   const currentUser = getStoredUser();
   const isAdmin = currentUser?.role === "admin";
@@ -18,6 +16,22 @@ export const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transact
   const [fromDate, setFromDate] = useState(todayIso());
   const [toDate, setToDate] = useState(todayIso());
   const [isExporting, setIsExporting] = useState(false);
+
+  // Server-side pagination + filter state. The full ledger lives in the DB;
+  // we fetch only the active page with bound filters rather than rendering a
+  // client-side slice of the shared 100-row poll cache.
+  const [searchTerm, setSearchTerm] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [riskFilter, setRiskFilter] = useState<string>("ALL");
+  const [statusFilter, setStatusFilter] = useState<string>("ALL");
+  const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
+  const [page, setPage] = useState(0); // zero-based
+  const [pageSize, setPageSize] = useState(50);
+  const [rows, setRows] = useState<Transaction[]>([]);
+  const [total, setTotal] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const firstLoadDone = useRef(false);
 
   const handleQuickDaily = () => {
     setFromDate(todayIso());
@@ -45,35 +59,57 @@ export const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transact
     }
   };
 
-  const [searchTerm, setSearchTerm] = useState("");
-  const [riskFilter, setRiskFilter] = useState<string>("ALL");
-  const [statusFilter, setStatusFilter] = useState<string>("ALL");
-  const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
+  // Debounce the search box so typing doesn't fire a request per keystroke.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setDebouncedSearch(searchTerm.trim());
+      setPage(0);
+    }, 350);
+    return () => clearTimeout(id);
+  }, [searchTerm]);
 
-  // Filtering logic
-  const filtered = transactions.filter(t => {
-    const matchesSearch = 
-      t.transaction_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      t.user_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      t.beneficiary_id.toLowerCase().includes(searchTerm.toLowerCase());
-      
-    const matchesRisk = 
-      riskFilter === "ALL" || 
-      t.risk_level === riskFilter;
-      
-    const matchesStatus = 
-      statusFilter === "ALL" || 
-      (t.status ? t.status === statusFilter : (statusFilter === "BLOCKED" && t.is_fraud === 1) || (statusFilter === "APPROVED" && t.is_fraud === 0));
-      
-    return matchesSearch && matchesRisk && matchesStatus;
-  });
+  // Fetch the active page whenever the query params change.
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+    setLoadError(null);
 
-  // Sorting
-  const sorted = [...filtered].sort((a, b) => {
-    const dateA = new Date(a.timestamp).getTime();
-    const dateB = new Date(b.timestamp).getTime();
-    return sortOrder === "desc" ? dateB - dateA : dateA - dateB;
-  });
+    getTransactionsPage({
+      limit: pageSize,
+      offset: page * pageSize,
+      search: debouncedSearch,
+      risk_level: riskFilter === "ALL" ? "" : riskFilter,
+      status: statusFilter === "ALL" ? "" : statusFilter,
+      sort: sortOrder,
+    })
+      .then((data) => {
+        if (cancelled) return;
+        setRows(data.items);
+        setTotal(data.total);
+        // If a filter change emptied the current page (e.g. new last page),
+        // snap back to the first page rather than showing an empty screen.
+        if (data.items.length === 0 && data.total > 0 && page > 0) {
+          setPage(Math.max(0, Math.ceil(data.total / pageSize) - 1));
+        }
+        firstLoadDone.current = true;
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        console.error("Failed to load transactions page:", e);
+        setLoadError("Could not load transactions. Please try again.");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [page, pageSize, debouncedSearch, riskFilter, statusFilter, sortOrder]);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const fromRow = total === 0 ? 0 : page * pageSize + 1;
+  const toRow = Math.min(total, page * pageSize + rows.length);
 
   // "Flagged By" shows the analyst who suspended a medium-risk case for
   // review, if any:
@@ -180,7 +216,7 @@ export const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transact
             <Filter className="h-4 w-4 text-dark-muted" />
             <select
               value={riskFilter}
-              onChange={(e) => setRiskFilter(e.target.value)}
+              onChange={(e) => { setRiskFilter(e.target.value); setPage(0); }}
               className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full md:w-32 focus:border-brand-primary focus:outline-none font-semibold"
             >
               <option value="ALL">All Risk levels</option>
@@ -192,7 +228,7 @@ export const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transact
 
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            onChange={(e) => { setStatusFilter(e.target.value); setPage(0); }}
             className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full md:w-36 focus:border-brand-primary focus:outline-none font-semibold"
           >
             <option value="ALL">All Statuses</option>
@@ -203,7 +239,7 @@ export const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transact
           </select>
 
           <button
-            onClick={() => setSortOrder(prev => prev === "desc" ? "asc" : "desc")}
+            onClick={() => { setSortOrder(prev => prev === "desc" ? "asc" : "desc"); setPage(0); }}
             className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 flex items-center gap-1.5 transition hover:bg-dark-border/20 w-full md:w-auto justify-center"
           >
             <ArrowUpDown className="h-4 w-4" /> 
@@ -215,7 +251,7 @@ export const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transact
       {/* Ledger Logs Table */}
       <div className="bg-dark-card border border-dark-border rounded-xl shadow-glow-brand overflow-hidden">
         <div className="overflow-x-auto">
-          {sorted.length > 0 ? (
+          {rows.length > 0 || isLoading ? (
             <table className="w-full text-left border-collapse">
               <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider">
                 <tr>
@@ -233,8 +269,16 @@ export const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transact
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
-                {sorted.map((row, idx) => (
-                  <tr key={idx} className="hover:bg-dark-border/10 transition">
+                {isLoading && rows.length === 0 && (
+                  <tr>
+                    <td colSpan={11} className="px-3 py-12 text-center">
+                      <Loader2 className="h-6 w-6 animate-spin text-guard-orange mx-auto" />
+                      <p className="text-xs text-dark-muted mt-2">Loading transactions…</p>
+                    </td>
+                  </tr>
+                )}
+                {rows.map((row, idx) => (
+                  <tr key={row.transaction_id || idx} className={`hover:bg-dark-border/10 transition ${isLoading ? "opacity-50" : ""}`}>
                     <td className="px-3 py-3.5 text-xs text-dark-muted font-semibold flex items-center gap-1.5">
                       <Calendar className="h-3.5 w-3.5" />
                       {new Date(row.timestamp).toLocaleString("en-NG", {
@@ -296,9 +340,54 @@ export const TransactionHistory: React.FC<TransactionHistoryProps> = ({ transact
             </table>
           ) : (
             <div className="py-20 text-center text-dark-muted text-xs">
-              No historical transactions match the search filters.
+              {loadError || "No historical transactions match the search filters."}
             </div>
           )}
+        </div>
+
+        {/* Pagination footer */}
+        <div className="px-4 py-3 border-t border-dark-border flex flex-col sm:flex-row items-center justify-between gap-3">
+          <span className="text-xs text-dark-muted font-semibold">
+            Showing <span className="text-dark-text">{fromRow}</span>–<span className="text-dark-text">{toRow}</span> of{" "}
+            <span className="text-dark-text">{total.toLocaleString()}</span>
+            {loadError && <span className="text-brand-danger ml-2">{loadError}</span>}
+          </span>
+
+          <div className="flex items-center gap-3">
+            {/* Page size */}
+            <label className="flex items-center gap-1.5 text-xs text-dark-muted font-semibold">
+              Rows
+              <select
+                value={pageSize}
+                onChange={(e) => { setPageSize(Number(e.target.value)); setPage(0); }}
+                className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded px-2 py-1 focus:border-guard-orange focus:outline-none"
+              >
+                {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
+
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setPage(p => Math.max(0, p - 1))}
+                disabled={page === 0 || isLoading}
+                className="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1.5 rounded-md bg-dark-bg border border-dark-border text-dark-text hover:border-guard-orange transition disabled:opacity-40"
+                aria-label="Previous page"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" /> Prev
+              </button>
+              <span className="text-xs text-dark-muted font-mono font-semibold whitespace-nowrap">
+                Page {page + 1} / {totalPages}
+              </span>
+              <button
+                onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                disabled={page >= totalPages - 1 || isLoading}
+                className="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1.5 rounded-md bg-dark-bg border border-dark-border text-dark-text hover:border-guard-orange transition disabled:opacity-40"
+                aria-label="Next page"
+              >
+                Next <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

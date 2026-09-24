@@ -15,7 +15,8 @@ all continue to work exactly as they did against sqlite3.
 import os
 import re
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 import pandas as pd
 import psycopg2
 import psycopg2.extras
@@ -23,6 +24,25 @@ from psycopg2 import pool as pg_pool
 from backend.app.config import settings
 
 _PLACEHOLDER_RE = re.compile(r"\?")
+
+# Version gate for in-place column migrations. Bump this ONLY when adding a
+# new migration step below; existing databases whose app_settings.schema_version
+# already matches skip the per-column information_schema checks on every cold
+# start (those checks were a serverless startup-cost multiplier).
+SCHEMA_VERSION = "3"
+
+# Cap how many historical rows feature engineering will load per queried
+# user/beneficiary. Bounded windows keep prediction latency flat as the
+# transactions table grows, instead of fetching the user's entire history
+# into Python on every /predict.
+WINDOW_LIMIT = int(os.getenv("FEATURE_WINDOW_LIMIT", "400"))
+
+# Analytics summary is recomputed over indexed data; cache it for a few
+# seconds so the dashboard's 5-10s polling doesn't rescan the table on every
+# request from every open browser tab. In-memory (per-instance) by design.
+ANALYTICS_CACHE_TTL = float(os.getenv("ANALYTICS_CACHE_TTL_SECONDS", "5"))
+
+_analytics_cache = {"ts": 0.0, "data": None}
 
 
 class _PGCursor:
@@ -172,24 +192,6 @@ class TransactionRepository:
                 )
             """)
 
-            # Migration check: add any columns that don't exist yet (payment_method,
-            # status, resolved_by, resolved_at, claimed_by, claimed_at) - safe to
-            # re-run on an existing DB.
-            for col_name, col_def in [
-                ("payment_method", "TEXT DEFAULT 'USSD'"),
-                ("status", "TEXT DEFAULT 'APPROVED'"),
-                ("resolved_by", "TEXT"),
-                ("resolved_at", "TEXT"),
-                ("claimed_by", "TEXT"),
-                ("claimed_at", "TEXT"),
-            ]:
-                col_check = conn.execute("""
-                    SELECT column_name FROM information_schema.columns
-                    WHERE table_name = 'transactions' AND column_name = ?
-                """, (col_name,))
-                if not col_check.fetchone():
-                    conn.execute(f"ALTER TABLE transactions ADD COLUMN {col_name} {col_def}")
-
             # 2. User Profiles Table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_profiles (
@@ -242,7 +244,44 @@ class TransactionRepository:
                 )
             """)
 
+            # Indexes for the hot query paths. CREATE INDEX IF NOT EXISTS is
+            # idempotent (a no-op once present), so on the live Neon database
+            # this block builds the indexes in-place on first deploy without
+            # touching data, then skips them on every subsequent cold start.
+            # Without these, every /predict feature query and the analytics
+            # aggregate would full-scan the transactions table.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_txn_user_time ON transactions (user_id, timestamp DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_txn_bene_time ON transactions (beneficiary_id, timestamp DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_txn_created ON transactions (created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_txn_status ON transactions (status)")
+
             conn.commit()
+
+        # Gated migrations: pay the per-column information_schema checks only
+        # when the schema version is stale. On a fresh DB this runs once; on
+        # every cold start afterwards it is skipped entirely.
+        current_version = self.get_setting("schema_version")
+        if current_version != SCHEMA_VERSION:
+            with self.get_connection() as conn:
+                # Migration check: add any columns that don't exist yet
+                # (payment_method, status, resolved_by, resolved_at, claimed_by,
+                # claimed_at) - safe to re-run on an existing DB.
+                for col_name, col_def in [
+                    ("payment_method", "TEXT DEFAULT 'USSD'"),
+                    ("status", "TEXT DEFAULT 'APPROVED'"),
+                    ("resolved_by", "TEXT"),
+                    ("resolved_at", "TEXT"),
+                    ("claimed_by", "TEXT"),
+                    ("claimed_at", "TEXT"),
+                ]:
+                    col_check = conn.execute("""
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_name = 'transactions' AND column_name = ?
+                    """, (col_name,))
+                    if not col_check.fetchone():
+                        conn.execute(f"ALTER TABLE transactions ADD COLUMN {col_name} {col_def}")
+                conn.commit()
+            self.upsert_setting("schema_version", SCHEMA_VERSION)
 
         # Seed profiles from CSV if database is empty
         self.seed_from_csv()
@@ -458,26 +497,29 @@ class TransactionRepository:
         failure so the route can translate it into the right HTTP status, or
         the updated row on success."""
         with self.get_connection() as conn:
+            claimed_at = datetime.now().isoformat()
+            # Atomic claim: the status='PENDING' guard inside the UPDATE makes
+            # the check-and-set race-free. Two analysts suspending the same
+            # transaction concurrently cannot both claim it - only one UPDATE
+            # matches, the other affects 0 rows and falls through below.
+            cursor = conn.execute("""
+                UPDATE transactions
+                SET status = 'SUSPENDED', claimed_by = ?, claimed_at = ?
+                WHERE transaction_id = ? AND status = 'PENDING'
+                RETURNING *
+            """, (flagged_by_email, claimed_at, txn_id))
+            updated = cursor.fetchone()
+            conn.commit()
+
+            if updated:
+                return dict(updated)
+
+            # No row was updated: it either doesn't exist or is no longer PENDING.
             cursor = conn.execute("SELECT * FROM transactions WHERE transaction_id = ?", (txn_id,))
             row = cursor.fetchone()
             if not row:
                 return {"error": "not_found"}
-
-            existing = dict(row)
-            if existing.get("status") != "PENDING":
-                return {"error": "not_pending"}
-
-            claimed_at = datetime.now().isoformat()
-            conn.execute("""
-                UPDATE transactions
-                SET status = 'SUSPENDED', claimed_by = ?, claimed_at = ?
-                WHERE transaction_id = ?
-            """, (flagged_by_email, claimed_at, txn_id))
-            conn.commit()
-
-            cursor = conn.execute("SELECT * FROM transactions WHERE transaction_id = ?", (txn_id,))
-            updated = cursor.fetchone()
-            return dict(updated) if updated else {"error": "not_found"}
+            return {"error": "not_pending"}
 
     def resolve_transaction(self, txn_id: str, decision: str, resolved_by: str) -> dict | None:
         """Admin resolves a PENDING or SUSPENDED transaction to APPROVED or BLOCKED."""
@@ -512,12 +554,17 @@ class TransactionRepository:
         except ValueError:
             current_time = datetime.utcnow()
 
+        # Window the query in SQL (index-assisted on idx_txn_user_time) and
+        # bound the row count so prediction latency stays flat as the table
+        # grows, instead of loading every transaction the user has ever made.
+        window_start = (current_time - timedelta(minutes=minutes_offset)).isoformat()
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 SELECT * FROM transactions
-                WHERE user_id = ?
+                WHERE user_id = ? AND timestamp >= ?
                 ORDER BY timestamp DESC
-            """, (user_id,))
+                LIMIT ?
+            """, (user_id, window_start, WINDOW_LIMIT))
 
             rows = cursor.fetchall()
             matching = []
@@ -537,12 +584,14 @@ class TransactionRepository:
         except ValueError:
             current_time = datetime.utcnow()
 
+        window_start = (current_time - timedelta(minutes=minutes_offset)).isoformat()
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 SELECT * FROM transactions
-                WHERE beneficiary_id = ?
+                WHERE beneficiary_id = ? AND timestamp >= ?
                 ORDER BY timestamp DESC
-            """, (beneficiary_id,))
+                LIMIT ?
+            """, (beneficiary_id, window_start, WINDOW_LIMIT))
 
             rows = cursor.fetchall()
             matching = []
@@ -555,6 +604,50 @@ class TransactionRepository:
                 except ValueError:
                     continue
             return matching
+
+    def get_features_context(self, user_id: str, beneficiary_id: str, timestamp_iso: str, minutes_offset: int = 1440) -> tuple:
+        """Batched feature context: both the user's and the beneficiary's recent
+        transactions for the requested lookback window, fetched in ONE indexed
+        query instead of the 4-6 sequential round-trips feature engineering used
+        to make per /predict. Returns (user_rows, beneficiary_rows), each list
+        newest-first and capped at WINDOW_LIMIT. Callers slice/partition the
+        rows in Python for velocity, daily, percentile and moving-average
+        features."""
+        try:
+            current_time = datetime.fromisoformat(timestamp_iso.replace("Z", ""))
+        except ValueError:
+            current_time = datetime.utcnow()
+
+        window_start = (current_time - timedelta(minutes=minutes_offset)).isoformat()
+        double_limit = WINDOW_LIMIT * 2  # budget rows for both identities
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM transactions
+                WHERE (user_id = ? OR beneficiary_id = ?) AND timestamp >= ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (user_id, beneficiary_id, window_start, double_limit))
+
+            user_rows = []
+            beneficiary_rows = []
+            for row in cursor.fetchall():
+                try:
+                    row_time = datetime.fromisoformat(str(row["timestamp"]).replace("Z", ""))
+                    if (current_time - row_time).total_seconds() < 0:
+                        continue
+                except ValueError:
+                    continue
+                if row["user_id"] == user_id:
+                    user_rows.append(dict(row))
+                if row["beneficiary_id"] == beneficiary_id:
+                    beneficiary_rows.append(dict(row))
+                if len(user_rows) >= WINDOW_LIMIT and len(beneficiary_rows) >= WINDOW_LIMIT:
+                    break
+            # Both sides are capped independently: when one identity has fewer
+            # than WINDOW_LIMIT matching rows inside the scan budget, the other
+            # side must still be trimmed to the window limit (the break above
+            # only fires when BOTH are full).
+            return user_rows[:WINDOW_LIMIT], beneficiary_rows[:WINDOW_LIMIT]
 
     def get_user_profile(self, user_id: str) -> dict | None:
         with self.get_connection() as conn:
@@ -583,10 +676,74 @@ class TransactionRepository:
             """, (limit,))
             return [dict(row) for row in cursor.fetchall()]
 
+    @staticmethod
+    def _build_filters(search: str, risk_level: str, status: str) -> tuple:
+        """Translate the pagination query params into (sql_fragment, params).
+        Values are always bound as parameters (never f-string'd) to keep the
+        existing ? -> %s placeholder wrapper happy and injection safe."""
+        clauses = []
+        params = []
+        if search:
+            like = f"%{search}%"
+            clauses.append("(transaction_id ILIKE ? OR user_id ILIKE ? OR beneficiary_id ILIKE ?)")
+            params.extend([like, like, like])
+        if risk_level:
+            clauses.append("risk_level = ?")
+            params.append(risk_level)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where_sql, params
+
+    def get_transactions_page(self, limit: int = 50, offset: int = 0,
+                              search: str = "", risk_level: str = "", status: str = "",
+                              sort: str = "desc") -> list:
+        """Paginated, filtered transaction listing for the ledger. ORDER BY
+        rides idx_txn_created; filters are bound params. `sort` is whitelisted
+        (desc|asc) so it can never inject SQL."""
+        order = "ASC" if sort == "asc" else "DESC"
+        where_sql, params = self._build_filters(search, risk_level, status)
+        with self.get_connection() as conn:
+            cursor = conn.execute(f"""
+                SELECT * FROM transactions
+                {where_sql}
+                ORDER BY created_at {order}
+                LIMIT {limit} OFFSET {offset}
+            """, tuple(params))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def count_transactions(self, search: str = "", risk_level: str = "", status: str = "") -> int:
+        where_sql, params = self._build_filters(search, risk_level, status)
+        with self.get_connection() as conn:
+            cursor = conn.execute(f"SELECT COUNT(*) AS total FROM transactions {where_sql}", tuple(params))
+            return cursor.fetchone()["total"]
+
+    def stream_transactions_in_range(self, start_date: str, end_date: str):
+        """Server-side named cursor for the admin CSV export. Rows are
+        streamed from Postgres in batches (itersize) and yielded one at a time
+        instead of materializing the entire date range in memory. The pooled
+        connection is always returned to the pool, even if the consumer stops
+        iterating early."""
+        raw_conn = self._pool.getconn()
+        try:
+            cursor = raw_conn.cursor(name="export_stream", cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.itersize = 500
+            cursor.execute("""
+                SELECT * FROM transactions
+                WHERE created_at::date >= %s::date
+                  AND created_at::date <= %s::date
+                ORDER BY created_at DESC
+            """, (start_date, end_date))
+            for row in cursor:
+                yield dict(row)
+        finally:
+            self._pool.putconn(raw_conn)
+
     def get_transactions_in_range(self, start_date: str, end_date: str) -> list:
-        """Used by the admin CSV report export. start_date/end_date are ISO
-        date strings (YYYY-MM-DD); end_date is treated as inclusive through
-        the end of that day."""
+        """Used by the admin CSV report export (small ranges) and retained for
+        compatibility; large exports should use stream_transactions_in_range
+        instead, which does not load the full range into memory."""
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 SELECT * FROM transactions
@@ -597,31 +754,47 @@ class TransactionRepository:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_analytics_summary(self) -> dict:
+        # Short TTL cache: the dashboard polls /analytics every few seconds
+        # from every open tab. Recomputing even a single-pass aggregate on each
+        # request is wasteful; 5s staleness is invisible on a live monitor.
+        now = time.time()
+        if _analytics_cache["data"] is not None and (now - _analytics_cache["ts"]) < ANALYTICS_CACHE_TTL:
+            return _analytics_cache["data"]
+
         with self.get_connection() as conn:
-            cursor_total = conn.execute("SELECT COUNT(*) as count FROM transactions")
-            total = cursor_total.fetchone()["count"]
+            # One scan, not six: COUNT with FILTER aggregates every metric in a
+            # single pass over the table (index-assisted on the risk/status
+            # columns where relevant).
+            cursor_summary = conn.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE is_fraud = 1) AS fraud,
+                    COUNT(*) FILTER (WHERE is_fraud = 0) AS genuine,
+                    COUNT(*) FILTER (WHERE risk_score >= 70) AS high_risk
+                FROM transactions
+            """)
+            summary = cursor_summary.fetchone()
+            total = summary["total"]
+            fraud = summary["fraud"]
+            genuine = summary["genuine"]
+            high_risk = summary["high_risk"]
 
-            cursor_fraud = conn.execute("SELECT COUNT(*) as count FROM transactions WHERE is_fraud = 1")
-            fraud = cursor_fraud.fetchone()["count"]
-
-            cursor_genuine = conn.execute("SELECT COUNT(*) as count FROM transactions WHERE is_fraud = 0")
-            genuine = cursor_genuine.fetchone()["count"]
-
-            cursor_high_risk = conn.execute("SELECT COUNT(*) as count FROM transactions WHERE risk_score >= 70")
-            high_risk = cursor_high_risk.fetchone()["count"]
-
-            # Hourly trend (Postgres equivalent of SQLite's strftime('%H', created_at))
+            # Hourly trend restricted to the last 24 hours of created_at so it
+            # rides idx_txn_created instead of grouping the entire table. The
+            # ISO-text window comparison matches how created_at is written.
+            window_start = (datetime.now() - timedelta(hours=24)).isoformat()
             cursor_trend = conn.execute("""
                 SELECT to_char(created_at::timestamp, 'HH24') as hour,
                        COUNT(*) as count,
-                       SUM(is_fraud) as fraud_count
+                       COALESCE(SUM(is_fraud), 0) as fraud_count
                 FROM transactions
+                WHERE created_at >= ?
                 GROUP BY hour
                 ORDER BY hour
-            """)
+            """, (window_start,))
             trend = [dict(row) for row in cursor_trend.fetchall()]
 
-            return {
+            result = {
                 "total_transactions": total,
                 "fraud_transactions": fraud,
                 "genuine_transactions": genuine,
@@ -629,6 +802,9 @@ class TransactionRepository:
                 "high_risk_transactions": high_risk,
                 "hourly_trend": trend
             }
+            _analytics_cache["ts"] = now
+            _analytics_cache["data"] = result
+            return result
 
 
 db_repo = TransactionRepository()

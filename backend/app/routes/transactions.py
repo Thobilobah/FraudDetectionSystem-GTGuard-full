@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Query, Depends, Response
+from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi.responses import StreamingResponse
 from backend.app.repositories.transaction_repository import db_repo
 from backend.app.schemas.transaction import ResolveTransactionRequest
 from backend.app.auth import require_admin, get_current_user
@@ -10,10 +11,28 @@ from datetime import date
 router = APIRouter()
 
 @router.get("/transactions")
-def get_transactions(limit: int = Query(100, ge=1, le=1000)):
+def get_transactions(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    search: str = Query("", description="Partial match on transaction_id, user_id or beneficiary_id"),
+    risk_level: str = Query("", description="LOW | MEDIUM | HIGH (empty = all)"),
+    status: str = Query("", description="APPROVED | PENDING | SUSPENDED | BLOCKED (empty = all)"),
+    sort: str = Query("desc", description="desc (newest first) or asc (oldest first)"),
+):
     try:
-        txns = db_repo.get_all_transactions(limit=limit)
-        
+        # Paginated + filtered ledger. Returns {items, total, limit, offset} so
+        # the history page can paginate the FULL history, not just a 100-row
+        # poll cache. ORDER BY rides idx_txn_created; filters are bound params.
+        sort = sort if sort in ("desc", "asc") else "desc"
+        txns = db_repo.get_transactions_page(
+            limit=limit, offset=offset,
+            search=search.strip(), risk_level=risk_level.strip(), status=status.strip(),
+            sort=sort,
+        )
+        total = db_repo.count_transactions(
+            search=search.strip(), risk_level=risk_level.strip(), status=status.strip()
+        )
+
         # Deserialize JSON rules for frontend mapping
         for txn in txns:
             if "triggered_rules" in txn and isinstance(txn["triggered_rules"], str):
@@ -21,8 +40,8 @@ def get_transactions(limit: int = Query(100, ge=1, le=1000)):
                     txn["triggered_rules"] = json.loads(txn["triggered_rules"])
                 except Exception:
                     txn["triggered_rules"] = []
-                    
-        return txns
+
+        return {"items": txns, "total": total, "limit": limit, "offset": offset}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -36,6 +55,7 @@ def export_transactions_csv(
     date range, including who claimed/reviewed and who ultimately resolved
     each one - so an admin can see exactly which analyst worked on what."""
     try:
+        # Validate the date range before opening the server-side cursor
         date.fromisoformat(start_date)
         date.fromisoformat(end_date)
     except ValueError:
@@ -44,38 +64,45 @@ def export_transactions_csv(
     if end_date < start_date:
         raise HTTPException(status_code=400, detail="end_date must not be before start_date.")
 
-    try:
-        txns = db_repo.get_transactions_in_range(start_date, end_date)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch transactions for export: {str(e)}")
-
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow([
+    filename = f"gt-guard-transactions_{start_date}_to_{end_date}.csv"
+    header = [
         "Timestamp", "Transaction ID", "User Account", "Beneficiary", "Method",
         "Amount (NGN)", "Risk Score", "Risk Level", "Decision",
         "Resolved By", "Resolved At", "Flagged By", "Flagged At",
-    ])
-    for t in txns:
-        writer.writerow([
-            t.get("created_at") or t.get("timestamp") or "",
-            t.get("transaction_id") or "",
-            t.get("user_id") or "",
-            t.get("beneficiary_id") or "",
-            t.get("payment_method") or "",
-            t.get("amount") if t.get("amount") is not None else "",
-            t.get("risk_score") if t.get("risk_score") is not None else "",
-            t.get("risk_level") or "",
-            t.get("status") or "",
-            t.get("resolved_by") or "",
-            t.get("resolved_at") or "",
-            t.get("claimed_by") or "",
-            t.get("claimed_at") or "",
-        ])
+    ]
 
-    filename = f"gt-guard-transactions_{start_date}_to_{end_date}.csv"
-    return Response(
-        content=buffer.getvalue(),
+    def _csv_line(values: list) -> str:
+        row_buffer = io.StringIO()
+        csv.writer(row_buffer).writerow(values)
+        return row_buffer.getvalue()
+
+    def _stream():
+        # Rows are yielded straight off a server-side (named) cursor in
+        # batches - the full date range never materializes in memory here.
+        yield _csv_line(header)
+        try:
+            txns_iter = db_repo.stream_transactions_in_range(start_date, end_date)
+            for t in txns_iter:
+                yield _csv_line([
+                    t.get("created_at") or t.get("timestamp") or "",
+                    t.get("transaction_id") or "",
+                    t.get("user_id") or "",
+                    t.get("beneficiary_id") or "",
+                    t.get("payment_method") or "",
+                    t.get("amount") if t.get("amount") is not None else "",
+                    t.get("risk_score") if t.get("risk_score") is not None else "",
+                    t.get("risk_level") or "",
+                    t.get("status") or "",
+                    t.get("resolved_by") or "",
+                    t.get("resolved_at") or "",
+                    t.get("claimed_by") or "",
+                    t.get("claimed_at") or "",
+                ])
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch transactions for export: {str(e)}")
+
+    return StreamingResponse(
+        _stream(),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

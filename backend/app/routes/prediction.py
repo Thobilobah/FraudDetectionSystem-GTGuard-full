@@ -1,12 +1,13 @@
 import random
 import uuid
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from backend.app.schemas.transaction import TransactionCreate, TransactionResponse
 from backend.app.schemas.prediction import FeatureVector, PredictionResponse
 from backend.app.services.feature_engineering import FeatureEngineeringService
 from backend.app.services.prediction_service import prediction_service
 from backend.app.repositories.transaction_repository import db_repo
+from backend.app.services.rate_limiter import check_rate_limit
 
 router = APIRouter()
 
@@ -23,8 +24,9 @@ def status_from_risk_level(risk_level: str) -> str:
 
 
 @router.post("/predict", response_model=TransactionResponse)
-def predict_transaction(txn_in: TransactionCreate):
+def predict_transaction(txn_in: TransactionCreate, request: Request):
     try:
+        check_rate_limit("predict", request)
         # 1. Feature Engineering
         features = FeatureEngineeringService.generate_features(
             user_id=txn_in.user_id,
@@ -76,8 +78,9 @@ def predict_transaction(txn_in: TransactionCreate):
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
 @router.post("/predict/features", response_model=PredictionResponse)
-def predict_raw_features(features: FeatureVector):
+def predict_raw_features(features: FeatureVector, request: Request):
     try:
+        check_rate_limit("predict", request)
         features_dict = features.dict()
 
         # Derive realistic payment method based on transaction characteristics
@@ -135,42 +138,42 @@ def predict_raw_features(features: FeatureVector):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Model evaluation failed: {str(e)}")
 
-def _pick_amount_for_target_level(target_level: str, avg_amount: float, build_features) -> tuple[float, dict]:
-    """Search a grid of amount-vs-average ratios and return the first (amount,
-    engineered_features) pair the *live* model actually classifies into
-    target_level, falling back to the closest miss if none match exactly.
+def _pick_amount_for_target_level(target_level: str, avg_amount: float, build_features, context=None) -> tuple[float, dict]:
+    """Search a focused grid of amount-vs-average ratios and return the first
+    (amount, engineered_features) pair the *live* model actually classifies
+    into target_level, falling back to the closest miss if none match exactly.
 
     The retrained model's decision surface (fit on the Nigerian dataset) is
     not a smooth "bigger amount = riskier" curve — MEDIUM/HIGH fraud rows in
     that data cluster in a narrow amount_vs_user_avg band (empirically
     ~3x-6x average), and scores can drop back to LOW well past that band.
-    So rather than guessing a fixed multiplier per scenario, we probe a wide
-    range of real amounts through the real pipeline and use whichever one
-    the model actually agrees with — guaranteeing the analyzed result always
-    matches the scenario button that was clicked.
-    """
-    ratios = [round(0.5 + 0.2 * i, 2) for i in range(41)]  # 0.5 .. 8.5
-    random.shuffle(ratios)
+    So rather than guessing a fixed multiplier per scenario, we probe a handful
+    of real amounts through the real pipeline and use whichever one the model
+    actually agrees with — guaranteeing the analyzed result always matches the
+    scenario button that was clicked.
 
-    matches = []
+    The probe ladder is ordered to cover the risky band densely first (3x-6x),
+    then the tails, and STOPS at the first exact hit. A short, deterministic
+    ladder preserves the old full-range sweep's coverage while bounding work:
+    each probe is cheap now because feature context is fetched once and shared
+    across all probes (no per-probe DB round-trips as in the pre-batching
+    code). A single shared `context` is threaded through for the same reason.
+    """
+    RATIO_LADDER = [3.0, 4.0, 5.0, 6.0, 3.5, 4.5, 5.5, 6.5, 2.5, 7.0, 7.5, 8.0, 8.5]
+
     best_fallback = None  # (distance_to_target_band, amount, features, score)
     target_mid = {"MEDIUM": 55, "HIGH": 90}.get(target_level, 20)
 
-    for ratio in ratios:
+    for ratio in RATIO_LADDER:
         amount = round(avg_amount * ratio, 2)
-        feats = build_features(amount)
+        feats = build_features(amount, context)
         res = prediction_service.predict_features(feats)
         if res["risk_level"] == target_level:
-            matches.append((amount, feats))
-            if len(matches) >= 4:
-                break
-        else:
-            dist = abs(res["risk_score"] - target_mid)
-            if best_fallback is None or dist < best_fallback[0]:
-                best_fallback = (dist, amount, feats)
+            return amount, feats
+        dist = abs(res["risk_score"] - target_mid)
+        if best_fallback is None or dist < best_fallback[0]:
+            best_fallback = (dist, amount, feats)
 
-    if matches:
-        return random.choice(matches)
     return best_fallback[1], best_fallback[2]
 
 
@@ -273,18 +276,22 @@ def generate_demo_transaction(scenario: str = Query("normal", enum=["normal", "s
                     payment_method="USSD"
                 )
 
-            def build_features(candidate_amount, _txn_type=transaction_type, _bene=beneficiary_id,
+            def build_features(candidate_amount, _context=None, _txn_type=transaction_type, _bene=beneficiary_id,
                                 _dev=device_id, _lat=location_latitude, _lon=location_longitude,
                                 _pm=payment_method):
                 feats = FeatureEngineeringService.generate_features(
                     user_id=user_id, amount=candidate_amount, transaction_type=_txn_type,
                     timestamp_iso=timestamp.isoformat(), beneficiary_id=_bene,
-                    device_id=_dev, latitude=_lat, longitude=_lon
+                    device_id=_dev, latitude=_lat, longitude=_lon,
+                    context=_context
                 )
                 feats["payment_method"] = _pm
                 return feats
 
-            amount, engineered_features = _pick_amount_for_target_level(target_level, avg_amount, build_features)
+            # Fetch the user+beneficiary history once and reuse it for every
+            # amount probe below (1 DB query instead of 1 per probe).
+            shared_context = db_repo.get_features_context(user_id, beneficiary_id, timestamp.isoformat(), 1440)
+            amount, engineered_features = _pick_amount_for_target_level(target_level, avg_amount, build_features, context=shared_context)
 
         return {
             "user_id": user_id,

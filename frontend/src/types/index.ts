@@ -29,6 +29,13 @@ export interface Transaction {
   claimed_at?: string | null;
 }
 
+export interface TransactionPage {
+  items: Transaction[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface ModelMetrics {
   accuracy: number;
   precision: number;

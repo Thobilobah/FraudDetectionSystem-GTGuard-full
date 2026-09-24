@@ -1,12 +1,16 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from backend.app.schemas.auth import LoginRequest, LoginResponse, AuthUser
 from backend.app.auth import create_access_token, determine_role
+from backend.app.services.rate_limiter import check_rate_limit
 
 router = APIRouter()
 
 
 @router.post("/auth/login", response_model=LoginResponse)
-def login(payload: LoginRequest):
+def login(payload: LoginRequest, request: Request):
+    # Blunt brute-force password guessing before the (demo-mode) acceptance
+    # check. In-process/approximate across instances; better than nothing.
+    check_rate_limit("login", request)
     email = (payload.email or "").strip().lower()
     password = payload.password or ""
 

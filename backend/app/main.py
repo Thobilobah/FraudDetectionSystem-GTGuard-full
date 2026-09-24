@@ -14,11 +14,16 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS for React frontend (Vite)
+# Enable CORS for the React dashboard. Default is wide-open ("*", credentials
+# off - the frontend authenticates via Authorization header, not cookies).
+# Set the CORS_ORIGINS env var to a comma-separated allowlist to lock the API
+# to specific dashboard origins in production.
+_cors_origins = settings.CORS_ORIGINS
+_wildcard = "*" in _cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Enable all origins for hackathon simplicity
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=not _wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )

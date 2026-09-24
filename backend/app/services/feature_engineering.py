@@ -23,18 +23,23 @@ class FeatureEngineeringService:
     @classmethod
     def generate_features(cls, user_id: str, amount: float, transaction_type: str, 
                           timestamp_iso: str, beneficiary_id: str, device_id: str, 
-                          latitude: float, longitude: float) -> dict:
+                          latitude: float, longitude: float,
+                          context: tuple | None = None) -> dict:
         
         # 1. Parse current transaction details
         try:
             dt = datetime.fromisoformat(timestamp_iso.replace("Z", ""))
         except ValueError:
             dt = datetime.utcnow()
+
+        # Normalize so naive stored rows never tz-mismatch a tz-aware caller
+        if dt.tzinfo:
+            dt = dt.replace(tzinfo=None)
             
         transaction_hour = dt.hour
         day_of_week = dt.strftime("%A")
         
-        # 2. Retrieve history profiles
+        # 2. Retrieve history profiles (single-row PK lookups - cheap)
         user_profile = db_repo.get_user_profile(user_id)
         beneficiary_profile = db_repo.get_beneficiary_profile(beneficiary_id)
         device_profile = db_repo.get_device_profile(device_id)
@@ -83,10 +88,12 @@ class FeatureEngineeringService:
             
             # device_change_recent: did user use a different device in their last txn?
             if last_txn_time_str:
-                # We can check transactions table for the user's last transaction
-                recent_txns = db_repo.get_recent_transactions(user_id, timestamp_iso, 1440) # 24h
-                if recent_txns:
-                    last_device = recent_txns[0]["device_id"]
+                # The user's recent (24h) transactions come from the shared
+                # batched context below - fetched once, not per-feature.
+                user_txns_for_device, _ = (context if context is not None
+                                           else db_repo.get_features_context(user_id, beneficiary_id, timestamp_iso, 1440))
+                if user_txns_for_device:
+                    last_device = user_txns_for_device[0]["device_id"]
                     if last_device != device_id:
                         device_change_recent = 1
 
@@ -119,8 +126,21 @@ class FeatureEngineeringService:
                     pass
 
         # 3. Calculate Velocity Features from recent transactions
-        # Query past transactions for this user within windows
-        txns_1h = db_repo.get_recent_transactions(user_id, timestamp_iso, 60) # 1 hour
+        # One batched, indexed fetch supplies BOTH the user's and the
+        # beneficiary's recent history (newest-first, bounded window) - instead
+        # of the 4+ sequential queries this used to issue per prediction.
+        # `context` may be injected so callers (e.g. the scenario demo grid)
+        # reuse a single fetch across multiple candidate amounts.
+        user_txns, bene_txns = (context if context is not None
+                                else db_repo.get_features_context(user_id, beneficiary_id, timestamp_iso, 1440))
+
+        txns_1h = []
+        for t in user_txns:
+            try:
+                if (dt - datetime.fromisoformat(t["timestamp"].replace("Z", ""))).total_seconds() <= 3600:
+                    txns_1h.append(t)
+            except ValueError:
+                continue
         txns_5m = [t for t in txns_1h if (dt - datetime.fromisoformat(t["timestamp"].replace("Z", ""))).total_seconds() <= 300]
         txns_1m = [t for t in txns_5m if (dt - datetime.fromisoformat(t["timestamp"].replace("Z", ""))).total_seconds() <= 60]
         
@@ -134,17 +154,17 @@ class FeatureEngineeringService:
         unique_beneficiaries_1h = len(set([t["beneficiary_id"] for t in txns_1h] + [beneficiary_id]))
         beneficiaries_last_1_hour = unique_beneficiaries_1h
 
-        # Query past transactions to this beneficiary in 24 hours
-        bene_txns_24h = db_repo.get_recent_beneficiary_transactions(beneficiary_id, timestamp_iso, 1440)
+        # Beneficiary-side 24h aggregates come from the same batched context
+        bene_txns_24h = bene_txns
         beneficiary_transaction_count_24h = len(bene_txns_24h) + 1
         
         unique_senders_24h = len(set([t["user_id"] for t in bene_txns_24h] + [user_id]))
         beneficiary_unique_senders_24h = unique_senders_24h
 
         # 4. User-centric daily statistics
-        # Retrieve all user's transactions today (matching calendar date of current transaction)
+        # all_user_txns is the 24h window (proxy for today), already bounded
         current_date_str = dt.strftime("%Y-%m-%d")
-        all_user_txns = db_repo.get_recent_transactions(user_id, timestamp_iso, 1440) # fetch last 24h as proxy for today
+        all_user_txns = user_txns
         
         daily_txns_today = [t for t in all_user_txns if t["timestamp"].startswith(current_date_str)]
         daily_transaction_count = len(daily_txns_today) + 1

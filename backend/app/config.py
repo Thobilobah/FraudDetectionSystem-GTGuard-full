@@ -35,5 +35,13 @@ class Settings:
     RISK_THRESHOLD_LOW: int = int(os.getenv("RISK_THRESHOLD_LOW", "40"))
     RISK_THRESHOLD_HIGH: int = int(os.getenv("RISK_THRESHOLD_HIGH", "70"))
 
+    # CORS: comma-separated allowlist of dashboard origins. Defaults to "*"
+    # (any origin, credentials off) for demo simplicity; set CORS_ORIGINS in
+    # production (e.g. "https://fraudguard-dashboard-eta.vercel.app") to lock
+    # the API to the real dashboard(s).
+    CORS_ORIGINS: list[str] = [
+        o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()
+    ]
+
 settings = Settings()
 

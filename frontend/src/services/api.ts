@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { Transaction, AnalyticsResponse } from "../types";
+import type { Transaction, TransactionPage, AnalyticsResponse } from "../types";
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const TOKEN_KEY = "fraudguard_token";
@@ -83,6 +83,23 @@ export const getAnalytics = async (): Promise<AnalyticsResponse> => {
 
 export const getTransactions = async (limit = 100): Promise<Transaction[]> => {
   const response = await api.get(`/transactions?limit=${limit}`);
+  // The endpoint now returns { items, total, limit, offset }; unwrap items so
+  // the shared poll cache keeps producing a plain array for the dashboard.
+  const data = response.data;
+  return Array.isArray(data) ? data : (data.items ?? []);
+};
+
+export interface TransactionPageParams {
+  limit?: number;
+  offset?: number;
+  search?: string;
+  risk_level?: string;
+  status?: string;
+  sort?: "desc" | "asc";
+}
+
+export const getTransactionsPage = async (params: TransactionPageParams = {}): Promise<TransactionPage> => {
+  const response = await api.get("/transactions", { params });
   return response.data;
 };
 

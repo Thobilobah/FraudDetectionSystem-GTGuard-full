@@ -90,10 +90,12 @@ export default function App() {
     // Initial fetch
     fetchAllData();
 
-    // Setup polling interval every 5 seconds to support live updates
+    // Setup polling interval to support live updates. 10s (was 5s): the
+    // dashboard analytics endpoint now serves a cached aggregate; the slower
+    // cadence halves dashboard-driven request load per analyst.
     const interval = setInterval(() => {
       fetchAllData();
-    }, 5000);
+    }, 10000);
 
     return () => clearInterval(interval);
   }, [authed]);
@@ -146,7 +148,9 @@ export default function App() {
           />
         );
       case "history":
-        return <TransactionHistory transactions={transactions} />;
+        // TransactionHistory paginates the FULL ledger server-side; it no
+        // longer needs the shared poll cache.
+        return <TransactionHistory />;
       case "status":
         return <SystemStatus health={health} />;
       default:
