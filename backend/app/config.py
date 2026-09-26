@@ -20,9 +20,13 @@ class Settings:
     RAZORPAY_WEBHOOK_SECRET: str | None = os.getenv("RAZORPAY_WEBHOOK_SECRET", None)
     
     # Database (PostgreSQL)
+    # 127.0.0.1 instead of "localhost": on Windows "localhost" resolves to
+    # ::1 first and each connect pays a ~2s IPv6 fallback stall before
+    # falling back to IPv4. Vercel always sets DATABASE_URL, so this default
+    # only matters for local development.
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
-        "postgresql://fraudguard:fraudguard@localhost:5432/fraudguard_db"
+        "postgresql://fraudguard:fraudguard@127.0.0.1:5432/fraudguard_db"
     )
     
     # ML Model Configs (defaults are repo-root-relative, so they work

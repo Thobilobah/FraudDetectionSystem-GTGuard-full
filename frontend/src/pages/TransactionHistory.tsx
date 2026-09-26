@@ -3,6 +3,7 @@ import type { Transaction } from "../types";
 import { Search, ShieldAlert, ShieldCheck, Calendar, Filter, ArrowUpDown, PauseCircle, Download, Loader2, AlertCircle, ChevronLeft, ChevronRight } from "lucide-react";
 import { getStoredUser, exportTransactionsCsv, getTransactionsPage } from "../services/api";
 import { useToast } from "../context/ToastContext";
+import { parseApiTimestamp } from "../utils/time";
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
@@ -281,7 +282,7 @@ export const TransactionHistory: React.FC = () => {
                   <tr key={row.transaction_id || idx} className={`hover:bg-dark-border/10 transition ${isLoading ? "opacity-50" : ""}`}>
                     <td className="px-3 py-3.5 text-xs text-dark-muted font-semibold flex items-center gap-1.5">
                       <Calendar className="h-3.5 w-3.5" />
-                      {new Date(row.timestamp).toLocaleString("en-NG", {
+                      {parseApiTimestamp(row.timestamp).toLocaleString("en-NG", {
                         month: "short",
                         day: "numeric",
                         hour: "2-digit",

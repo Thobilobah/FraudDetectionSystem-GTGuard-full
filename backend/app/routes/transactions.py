@@ -45,6 +45,18 @@ def get_transactions(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/transactions/purge-internal")
+def purge_internal_transactions(current_user: dict = Depends(require_admin)):
+    """Admin-only maintenance: remove the txn_hist_* / txn_velocity_* demo
+    support rows that older scenario generators persisted into the ledger.
+    The generator now builds those rows in memory, so this only needs to run
+    once to clear the phantom entries from Live Monitor / Transaction History."""
+    try:
+        deleted = db_repo.purge_internal_transactions()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to purge internal rows: {str(e)}")
+    return {"deleted": deleted}
+
 @router.get("/transactions/export")
 def export_transactions_csv(
     start_date: str = Query(..., description="ISO date, e.g. 2026-09-01"),

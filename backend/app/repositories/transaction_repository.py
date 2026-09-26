@@ -117,11 +117,16 @@ class TransactionRepository:
 
     def _ensure_pool(self):
         if TransactionRepository._pool is None:
-            # Pool sizing is env-driven. In serverless (Vercel) each cold
-            # start spins up a fresh instance-threaded pool, so we default
-            # to LAZY connections (minconn=0) instead of eagerly opening 2
-            # sockets against the hosted Postgres per instance.
-            minconn = int(os.getenv("DB_POOL_MIN", "0"))
+            # Pool sizing is env-driven. minconn must stay >= 1: psycopg2's
+            # putconn only RETAINS a returned connection while
+            # len(idle) < minconn - with minconn=0 every returned connection
+            # was immediately closed, so "lazy" pooling silently defeated
+            # itself and every single query paid a fresh TCP+TLS+SCRAM
+            # handshake against Postgres (hundreds of ms per request on
+            # serverless). minconn=2 keeps up to two warm connections per
+            # instance while still bounding idle sockets; connections beyond
+            # that are still closed on return.
+            minconn = int(os.getenv("DB_POOL_MIN", "2"))
             maxconn = int(os.getenv("DB_POOL_MAX", "20"))
             TransactionRepository._pool = pg_pool.ThreadedConnectionPool(
                 minconn=minconn,
@@ -718,6 +723,22 @@ class TransactionRepository:
         with self.get_connection() as conn:
             cursor = conn.execute(f"SELECT COUNT(*) AS total FROM transactions {where_sql}", tuple(params))
             return cursor.fetchone()["total"]
+
+    def purge_internal_transactions(self) -> int:
+        """Delete the demo-support rows older scenario generators persisted
+        into the ledger (txn_hist_* history seeds + txn_velocity_* jump seeds).
+        Those were never user-simulated transactions - they only existed to
+        feed feature engineering - but they showed up as phantom entries in
+        Live Monitor / Transaction History. LEFT() pinpoints the prefixes
+        exactly (a LIKE '_' wildcard would also match 'txnXhistX...')."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                DELETE FROM transactions
+                WHERE LEFT(transaction_id, 9) = 'txn_hist_'
+                   OR LEFT(transaction_id, 13) = 'txn_velocity_'
+            """)
+            deleted = cursor.rowcount
+            return deleted if deleted and deleted > 0 else 0
 
     def stream_transactions_in_range(self, start_date: str, end_date: str):
         """Server-side named cursor for the admin CSV export. Rows are

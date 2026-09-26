@@ -6,7 +6,7 @@ from backend.app.schemas.transaction import TransactionCreate, TransactionRespon
 from backend.app.schemas.prediction import FeatureVector, PredictionResponse
 from backend.app.services.feature_engineering import FeatureEngineeringService
 from backend.app.services.prediction_service import prediction_service
-from backend.app.repositories.transaction_repository import db_repo
+from backend.app.repositories.transaction_repository import db_repo, WINDOW_LIMIT
 from backend.app.services.rate_limiter import check_rate_limit
 
 router = APIRouter()
@@ -138,30 +138,31 @@ def predict_raw_features(features: FeatureVector, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Model evaluation failed: {str(e)}")
 
-def _pick_amount_for_target_level(target_level: str, avg_amount: float, build_features, context=None) -> tuple[float, dict]:
-    """Search a focused grid of amount-vs-average ratios and return the first
-    (amount, engineered_features) pair the *live* model actually classifies
-    into target_level, falling back to the closest miss if none match exactly.
+def _pick_amount_for_target_level(target_level: str, avg_amount: float, build_features,
+                                  context=None, ratios=None) -> tuple[float, dict, bool, float]:
+    """Probe a focused grid of amount-vs-average ratios through the live model
+    pipeline and return (amount, engineered_features, exact_match, distance).
+
+    exact_match is True only when a probe actually classifies into
+    target_level; distance then reports how far the best fallback candidate's
+    score sits from the target band's midpoint, so the caller can retry the
+    scenario with a different user instead of accepting a mismatched tier.
 
     The retrained model's decision surface (fit on the Nigerian dataset) is
     not a smooth "bigger amount = riskier" curve — MEDIUM/HIGH fraud rows in
     that data cluster in a narrow amount_vs_user_avg band (empirically
     ~3x-6x average), and scores can drop back to LOW well past that band.
-    So rather than guessing a fixed multiplier per scenario, we probe a handful
-    of real amounts through the real pipeline and use whichever one the model
-    actually agrees with — guaranteeing the analyzed result always matches the
-    scenario button that was clicked.
+    So rather than guessing a fixed multiplier per scenario, we probe real
+    amounts through the real pipeline and use whichever one the model
+    actually agrees with. The ladder is ordered to cover the risky band
+    densely first (3x-6x), then the tails, and STOPS at the first exact hit.
+    Each probe is cheap because the feature context is fetched once by the
+    caller and shared across every probe (no per-probe DB round-trips)."""
+    RATIO_LADDER = ratios or [
+        3.0, 4.0, 5.0, 6.0, 3.5, 4.5, 5.5, 6.5, 2.5, 7.0, 7.5, 8.0, 8.5, 9.0, 10.0
+    ]
 
-    The probe ladder is ordered to cover the risky band densely first (3x-6x),
-    then the tails, and STOPS at the first exact hit. A short, deterministic
-    ladder preserves the old full-range sweep's coverage while bounding work:
-    each probe is cheap now because feature context is fetched once and shared
-    across all probes (no per-probe DB round-trips as in the pre-batching
-    code). A single shared `context` is threaded through for the same reason.
-    """
-    RATIO_LADDER = [3.0, 4.0, 5.0, 6.0, 3.5, 4.5, 5.5, 6.5, 2.5, 7.0, 7.5, 8.0, 8.5]
-
-    best_fallback = None  # (distance_to_target_band, amount, features, score)
+    best_fallback = None  # (distance_to_target_band, amount, features)
     target_mid = {"MEDIUM": 55, "HIGH": 90}.get(target_level, 20)
 
     for ratio in RATIO_LADDER:
@@ -169,144 +170,255 @@ def _pick_amount_for_target_level(target_level: str, avg_amount: float, build_fe
         feats = build_features(amount, context)
         res = prediction_service.predict_features(feats)
         if res["risk_level"] == target_level:
-            return amount, feats
+            return amount, feats, True, 0.0
         dist = abs(res["risk_score"] - target_mid)
         if best_fallback is None or dist < best_fallback[0]:
             best_fallback = (dist, amount, feats)
 
-    return best_fallback[1], best_fallback[2]
+    return best_fallback[1], best_fallback[2], False, best_fallback[0]
+
+
+def _synthetic_context_row(user_id: str, amount: float, timestamp_iso: str,
+                           beneficiary_id: str, device_id: str,
+                           latitude: float, longitude: float) -> dict:
+    """Shape a transactions-table row WITHOUT writing it. The suspicious /
+    high-risk scenarios need a few hours of plausible recent history so
+    history-driven features (moving average, velocity counts, percentiles)
+    have real, non-zero values to react to — but earlier versions persisted
+    these txn_hist_* / txn_velocity_* rows into the ledger, where they showed
+    up as phantom transactions the user never simulated (and each save also
+    nudged the user's live profile). The row now exists only in memory and is
+    merged into the shared feature context below."""
+    return {
+        "transaction_id": f"txn_ctx_{uuid.uuid4().hex[:8]}",
+        "user_id": user_id,
+        "amount": amount,
+        "transaction_type": "P2P",
+        "timestamp": timestamp_iso,
+        "beneficiary_id": beneficiary_id,
+        "device_id": device_id,
+        "location_latitude": latitude,
+        "location_longitude": longitude,
+        "is_fraud": 0,
+        "fraud_probability": 0.01,
+        "risk_score": 1,
+        "risk_level": "LOW",
+        "triggered_rules": "[]",
+        "created_at": timestamp_iso,
+        "payment_method": "USSD",
+        "status": "APPROVED",
+        "resolved_by": None,
+        "resolved_at": None,
+        "claimed_by": None,
+        "claimed_at": None,
+    }
+
+
+def _pick_demo_user(excluded: set) -> str | None:
+    """One random seeded user not already tried during this generate call, so
+    a scenario retry lands on a fresh profile (different avg/std/history)
+    that may reach the target risk tier. None once every candidate is used."""
+    conn = db_repo.get_connection()
+    try:
+        if excluded:
+            placeholders = ",".join("?" for _ in excluded)
+            cursor = conn.execute(
+                f"SELECT user_id FROM user_profiles "
+                f"WHERE user_id NOT IN ({placeholders}) "
+                f"ORDER BY RANDOM() LIMIT 1",
+                tuple(excluded),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT user_id FROM user_profiles ORDER BY RANDOM() LIMIT 1"
+            )
+        row = cursor.fetchone()
+        return row["user_id"] if row else None
+    finally:
+        conn.close()
+
+
+def _build_demo_attempt(scenario: str, target_level: str, user_id: str) -> dict:
+    """Build one candidate demo transaction for the given user and probe the
+    live model until it agrees with the scenario's risk tier. Returns the
+    scenario fields plus matched/distance so generate_demo_transaction can
+    retry with another user on a miss."""
+    user_profile = db_repo.get_user_profile(user_id)
+    avg_amount = (user_profile["avg_amount"] if user_profile else None) or 1500.0
+    last_lat = (user_profile["last_latitude"] if user_profile else None) or 6.5244
+    last_lon = (user_profile["last_longitude"] if user_profile else None) or 3.3792
+
+    timestamp = datetime.now()
+    synthetic_rows: list[dict] = []
+    ratios = None  # default risky ladder for suspicious / high_risk
+
+    # Scenario parameters. Beyond scaling the amount off the user's real
+    # average (so the amount-based signals the retrained model actually
+    # relies on move in the right direction), each scenario also pushes
+    # real, live-engineered location/device/beneficiary signals so the
+    # rule engine's full signal set (distance anomalies, new-device/
+    # beneficiary flags, etc.) fires accurately — not just the amount rules.
+    if scenario == "normal":
+        amount = round(avg_amount * random.uniform(0.3, 1.1), 2)
+        if amount <= 0: amount = 100.0
+        transaction_type = random.choice(["P2P", "P2M", "Merchant"])
+        beneficiary_id = f"acct_{random.randint(100, 999)}@ussd"
+        device_id = f"dev_{random.randint(100, 999)}"
+        # Location is very close to the user's last known position
+        location_latitude = round(last_lat + random.uniform(-0.005, 0.005), 4)
+        location_longitude = round(last_lon + random.uniform(-0.005, 0.005), 4)
+        payment_method = random.choice(["USSD", "USSD", "USSD", "Net Banking", "Debit Card", "Wallet"])
+        # Try the randomized amount first so amounts stay varied; only if the
+        # model disagrees with the scenario's LOW tier does the ladder below
+        # sweep nearby small ratios until it does.
+        ratios = [amount / avg_amount if avg_amount > 0 else 1.0,
+                  0.9, 0.7, 1.1, 0.5, 1.0, 0.6, 0.8, 1.2, 0.4, 1.5, 0.3]
+    else:
+        # Seed a few realistic prior transactions (near the user's real
+        # average, spread over the last several hours) so history-driven
+        # signals — moving_average_deviation, amount_percentile, daily
+        # totals — have real, non-zero values to react to. Without prior
+        # history, a freshly-picked user's "moving average" is always 0,
+        # which pins the retrained model to LOW regardless of the current
+        # amount. Built in memory only - never written to the ledger.
+        for hours_ago in (6, 4, 2):
+            synthetic_rows.append(_synthetic_context_row(
+                user_id=user_id,
+                amount=round(avg_amount * random.uniform(0.8, 1.2), 2),
+                timestamp_iso=(timestamp - timedelta(hours=hours_ago)).isoformat(),
+                beneficiary_id="acct_regular@ussd", device_id="dev_regular",
+                latitude=last_lat, longitude=last_lon,
+            ))
+
+        if scenario == "suspicious":
+            transaction_type = random.choice(["Bill Payment", "Recharge"])
+            # New, unfamiliar beneficiary and device
+            beneficiary_id = "acct_suspicious_mule@ussd"
+            device_id = "dev_unfamiliar"
+            # Location is moderately far (30-80 km)
+            location_latitude = round(last_lat + random.uniform(0.3, 0.8), 4)
+            location_longitude = round(last_lon + random.uniform(0.3, 0.8), 4)
+            payment_method = random.choice(["Debit Card", "Net Banking", "Mobile Transfer", "Wallet"])
+
+        else:  # high_risk
+            transaction_type = "P2P"
+            beneficiary_id = "acct_flagged_fraud_wallet@ussd"
+            device_id = "dev_blacklisted_malware"
+            # Location is extremely far (impossible travel: 600+ km away)
+            location_latitude = round(last_lat + random.uniform(6.0, 12.0), 4)
+            location_longitude = round(last_lon + random.uniform(6.0, 12.0), 4)
+            payment_method = random.choice(["Debit Card", "Mobile Transfer", "Wallet", "Net Banking"])
+            # A transaction at the user's last known location 2 minutes ago,
+            # so the jump to the far-away coordinates above trips the
+            # impossible-travel velocity check (in-memory - it used to be a
+            # persisted txn_velocity_* row).
+            synthetic_rows.append(_synthetic_context_row(
+                user_id=user_id, amount=100.0,
+                timestamp_iso=(timestamp - timedelta(minutes=2)).isoformat(),
+                beneficiary_id="acct_legit@ussd", device_id="dev_legit",
+                latitude=last_lat, longitude=last_lon,
+            ))
+
+    # The travel story above lives in the synthetic rows, not in the user's
+    # profile (which the old code used to rewrite on every generate just to
+    # surface this flag). Pin it per scenario so high_risk always carries the
+    # impossible-travel signal its 600km-in-2-minutes history implies, while
+    # the other tiers never pick up a stale/spurious one.
+    forced_impossible_travel = 1 if scenario == "high_risk" else 0
+
+    def build_features(candidate_amount, _context=None, _txn_type=transaction_type,
+                        _bene=beneficiary_id, _dev=device_id,
+                        _lat=location_latitude, _lon=location_longitude,
+                        _pm=payment_method):
+        feats = FeatureEngineeringService.generate_features(
+            user_id=user_id, amount=candidate_amount, transaction_type=_txn_type,
+            timestamp_iso=timestamp.isoformat(), beneficiary_id=_bene,
+            device_id=_dev, latitude=_lat, longitude=_lon, context=_context
+        )
+        feats["payment_method"] = _pm
+        feats["impossible_travel_flag"] = forced_impossible_travel
+        return feats
+
+    # Fetch the user+beneficiary history once, merge the synthetic rows
+    # exactly where the old persisted ones would have landed (newest-first,
+    # window-capped), and reuse that shared context for every amount probe
+    # below (1 DB query instead of 1 per probe).
+    user_rows, bene_rows = db_repo.get_features_context(
+        user_id, beneficiary_id, timestamp.isoformat(), 1440)
+    if synthetic_rows:
+        user_rows = sorted(
+            user_rows + [r for r in synthetic_rows if r["user_id"] == user_id],
+            key=lambda r: r["timestamp"], reverse=True)[:WINDOW_LIMIT]
+        bene_rows = sorted(
+            bene_rows + [r for r in synthetic_rows if r["beneficiary_id"] == beneficiary_id],
+            key=lambda r: r["timestamp"], reverse=True)[:WINDOW_LIMIT]
+    shared_context = (user_rows, bene_rows)
+
+    amount, engineered_features, matched, distance = _pick_amount_for_target_level(
+        target_level, avg_amount, build_features, context=shared_context, ratios=ratios)
+
+    return {
+        "user_id": user_id,
+        "amount": amount,
+        "transaction_type": transaction_type,
+        "timestamp": timestamp,
+        "beneficiary_id": beneficiary_id,
+        "device_id": device_id,
+        "location_latitude": location_latitude,
+        "location_longitude": location_longitude,
+        "payment_method": payment_method,
+        "engineered_features": engineered_features,
+        "matched": matched,
+        "distance": distance,
+    }
 
 
 @router.post("/demo/generate")
 def generate_demo_transaction(scenario: str = Query("normal", enum=["normal", "suspicious", "high_risk"])):
     try:
-        # Pick a random *seeded* user so the scenario's amount multiplier
-        # scales off their real historical average/std from the dataset —
-        # a brand-new user has no history yet, which collapses
-        # amount_vs_user_avg to a trivial 1.0 and makes every scenario
-        # engineer to the same (LOW) risk tier.
-        conn = db_repo.get_connection()
-        cursor = conn.execute("SELECT user_id FROM user_profiles ORDER BY RANDOM() LIMIT 1")
-        row = cursor.fetchone()
-        conn.close()
+        # Each scenario button promises a specific risk tier, but the model's
+        # decision surface is not a smooth "bigger amount = riskier" curve -
+        # some seeded users simply can't reach HIGH (or MEDIUM) at any
+        # amount, and a single missed ladder probe used to silently fall back
+        # to a mismatched tier. Probe up to 8 different seeded users until
+        # the live model actually agrees with the clicked scenario (first
+        # exact hit wins; the closest miss is kept as worst-case fallback).
+        target_level = {"normal": "LOW", "suspicious": "MEDIUM", "high_risk": "HIGH"}[scenario]
+        tried_users: set = set()
+        best = None
+        for _ in range(8):
+            user_id = _pick_demo_user(tried_users)
+            if user_id is None:
+                if tried_users:
+                    break
+                # Fresh database with no seeded profiles: one fallback identity.
+                user_id = f"CUST_{random.randint(10**7, 10**8 - 1):X}"
+            tried_users.add(user_id)
+            attempt = _build_demo_attempt(scenario, target_level, user_id)
+            if best is None or attempt["distance"] < best["distance"]:
+                best = attempt
+            if attempt["matched"]:
+                break
 
-        user_id = row["user_id"] if row else f"CUST_{random.randint(10**7, 10**8 - 1):X}"
-        user_profile = db_repo.get_user_profile(user_id)
-        avg_amount = (user_profile["avg_amount"] if user_profile else None) or 1500.0
-        last_lat = (user_profile["last_latitude"] if user_profile else None) or 6.5244
-        last_lon = (user_profile["last_longitude"] if user_profile else None) or 3.3792
-
-        timestamp = datetime.now()
-
-        # Scenario parameters. Beyond scaling the amount off the user's real
-        # average (so the amount-based signals the retrained model actually
-        # relies on move in the right direction), each scenario also pushes
-        # real, live-engineered location/device/beneficiary signals so the
-        # rule engine's full signal set (distance anomalies, impossible
-        # travel, new-device/beneficiary flags, etc.) fires accurately —
-        # not just the amount-based rules.
-        if scenario == "normal":
-            amount = round(avg_amount * random.uniform(0.3, 1.1), 2)
-            if amount <= 0: amount = 100.0
-            transaction_type = random.choice(["P2P", "P2M", "Merchant"])
-            beneficiary_id = f"acct_{random.randint(100, 999)}@ussd"
-            device_id = f"dev_{random.randint(100, 999)}"
-            # Location is very close to the user's last known position
-            location_latitude = round(last_lat + random.uniform(-0.005, 0.005), 4)
-            location_longitude = round(last_lon + random.uniform(-0.005, 0.005), 4)
-            payment_method = random.choice(["USSD", "USSD", "USSD", "Net Banking", "Debit Card", "Wallet"])
-
-            engineered_features = FeatureEngineeringService.generate_features(
-                user_id=user_id, amount=amount, transaction_type=transaction_type,
-                timestamp_iso=timestamp.isoformat(), beneficiary_id=beneficiary_id,
-                device_id=device_id, latitude=location_latitude, longitude=location_longitude
-            )
-
-        else:
-            # Seed a few realistic prior transactions (near the user's real
-            # average, spread over the last several hours) so history-driven
-            # signals — moving_average_deviation, amount_percentile, daily
-            # totals — have real, non-zero values to react to. Without any
-            # prior history, a freshly-picked user's "moving average" is
-            # always 0, which pins the retrained model to LOW regardless of
-            # the current amount.
-            for hours_ago in (6, 4, 2):
-                hist_amount = round(avg_amount * random.uniform(0.8, 1.2), 2)
-                db_repo.save_transaction(
-                    txn_id=f"txn_hist_{uuid.uuid4().hex[:8]}",
-                    user_id=user_id, amount=hist_amount, txn_type="P2P",
-                    timestamp=(timestamp - timedelta(hours=hours_ago)).isoformat(),
-                    beneficiary_id="acct_regular@ussd", device_id="dev_regular",
-                    latitude=last_lat, longitude=last_lon,
-                    is_fraud=0, prob=0.01, score=1, level="LOW", rules=[],
-                    payment_method="USSD"
-                )
-
-            if scenario == "suspicious":
-                target_level = "MEDIUM"
-                transaction_type = random.choice(["Bill Payment", "Recharge"])
-                # New, unfamiliar beneficiary and device
-                beneficiary_id = "acct_suspicious_mule@ussd"
-                device_id = "dev_unfamiliar"
-                # Location is moderately far (30-80 km)
-                location_latitude = round(last_lat + random.uniform(0.3, 0.8), 4)
-                location_longitude = round(last_lon + random.uniform(0.3, 0.8), 4)
-                payment_method = random.choice(["Debit Card", "Net Banking", "Mobile Transfer", "Wallet"])
-
-            else:  # high_risk
-                target_level = "HIGH"
-                transaction_type = "P2P"
-                beneficiary_id = "acct_flagged_fraud_wallet@ussd"
-                device_id = "dev_blacklisted_malware"
-                # Location is extremely far (impossible travel: 600+ km away)
-                location_latitude = round(last_lat + random.uniform(6.0, 12.0), 4)
-                location_longitude = round(last_lon + random.uniform(6.0, 12.0), 4)
-                payment_method = random.choice(["Debit Card", "Mobile Transfer", "Wallet", "Net Banking"])
-
-                # Insert a fake recent transaction at the user's last known
-                # location just 2 minutes ago, so the jump to the far-away
-                # coordinates above trips the impossible-travel velocity check.
-                db_repo.save_transaction(
-                    txn_id=f"txn_velocity_{uuid.uuid4().hex[:8]}",
-                    user_id=user_id, amount=100.0, txn_type="P2P",
-                    timestamp=(timestamp - timedelta(minutes=2)).isoformat(),
-                    beneficiary_id="acct_legit@ussd", device_id="dev_legit",
-                    latitude=last_lat, longitude=last_lon,
-                    is_fraud=0, prob=0.01, score=1, level="LOW", rules=[],
-                    payment_method="USSD"
-                )
-
-            def build_features(candidate_amount, _context=None, _txn_type=transaction_type, _bene=beneficiary_id,
-                                _dev=device_id, _lat=location_latitude, _lon=location_longitude,
-                                _pm=payment_method):
-                feats = FeatureEngineeringService.generate_features(
-                    user_id=user_id, amount=candidate_amount, transaction_type=_txn_type,
-                    timestamp_iso=timestamp.isoformat(), beneficiary_id=_bene,
-                    device_id=_dev, latitude=_lat, longitude=_lon,
-                    context=_context
-                )
-                feats["payment_method"] = _pm
-                return feats
-
-            # Fetch the user+beneficiary history once and reuse it for every
-            # amount probe below (1 DB query instead of 1 per probe).
-            shared_context = db_repo.get_features_context(user_id, beneficiary_id, timestamp.isoformat(), 1440)
-            amount, engineered_features = _pick_amount_for_target_level(target_level, avg_amount, build_features, context=shared_context)
+        if best is None:
+            raise HTTPException(status_code=500, detail="Could not build a demo transaction.")
 
         return {
-            "user_id": user_id,
-            "amount": amount,
-            "transaction_type": transaction_type,
-            "timestamp": timestamp.isoformat(),
-            "beneficiary_id": beneficiary_id,
-            "device_id": device_id,
-            "location_latitude": location_latitude,
-            "location_longitude": location_longitude,
-            "payment_method": payment_method,
+            "user_id": best["user_id"],
+            "amount": best["amount"],
+            "transaction_type": best["transaction_type"],
+            "timestamp": best["timestamp"].isoformat(),
+            "beneficiary_id": best["beneficiary_id"],
+            "device_id": best["device_id"],
+            "location_latitude": best["location_latitude"],
+            "location_longitude": best["location_longitude"],
+            "payment_method": best["payment_method"],
             # The frontend posts this straight to /predict/features so the
             # analyzed result matches what was just displayed.
-            "engineered_features": engineered_features
+            "engineered_features": best["engineered_features"]
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Demo generation failed: {str(e)}")
 

@@ -3,6 +3,7 @@ import type { Transaction } from "../types";
 import { resolveTransaction, suspendTransaction, getStoredUser, getTransactionsPage } from "../services/api";
 import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { useToast } from "../context/ToastContext";
+import { parseApiTimestamp } from "../utils/time";
 
 interface LiveMonitorProps {
   onRefresh: () => void;
@@ -391,7 +392,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                         {getStatusDisplay(txn.status)}
                       </td>
                       <td className="px-3 py-3.5 text-right text-xs text-dark-muted">
-                        {new Date(txn.timestamp).toLocaleTimeString()}
+                        {parseApiTimestamp(txn.timestamp).toLocaleTimeString()}
                       </td>
                     </tr>
                   ))}
@@ -538,7 +539,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                   <span>
                     Flagged by <span className="font-semibold">{selectedTxn.claimed_by}</span>
                     {selectedTxn.claimed_at && (
-                      <> at {new Date(selectedTxn.claimed_at).toLocaleString()}</>
+                      <> at {parseApiTimestamp(selectedTxn.claimed_at).toLocaleString()}</>
                     )}
                   </span>
                 </div>
@@ -548,7 +549,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                 <div className="text-[11px] text-dark-muted bg-gray-50 dark:bg-white/5 border border-dark-border rounded-lg px-3 py-2">
                   Resolved by <span className="font-semibold text-dark-text">{selectedTxn.resolved_by}</span>
                   {selectedTxn.resolved_at && (
-                    <> at {new Date(selectedTxn.resolved_at).toLocaleString()}</>
+                    <> at {parseApiTimestamp(selectedTxn.resolved_at).toLocaleString()}</>
                   )}
                 </div>
               )}
