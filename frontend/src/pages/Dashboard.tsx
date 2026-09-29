@@ -1,14 +1,15 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import type { RealTimeMetrics, ModelMetadata, Transaction } from "../types";
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Bar, Legend
 } from "recharts";
 import { 
-  ShieldAlert, ShieldCheck, Activity, Percent, ArrowUpRight, TrendingUp, AlertTriangle, Inbox
+  ShieldAlert, ShieldCheck, Activity, Percent, ArrowUpRight, TrendingUp, AlertTriangle, Inbox, Flag, Loader2, Clock
 } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
-import { getStoredUser } from "../services/api";
+import { getStoredUser, getTransactionsPage } from "../services/api";
+import { parseApiTimestamp } from "../utils/time";
 
 interface DashboardProps {
   metrics: RealTimeMetrics;
@@ -35,6 +36,56 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const highRiskAlerts = latestTransactions
     .filter(t => t.risk_score !== null && t.risk_score >= 70)
     .slice(0, 5);
+
+  // Analyst's own flagged work: server-filtered on claimed_by = my email, so
+  // every analyst sees ONLY the transactions they personally suspended
+  // (each analyst's section is unique to them), newest first.
+  const analystEmail = !isAdmin ? (getStoredUser()?.email ?? "") : "";
+  const [myFlags, setMyFlags] = useState<Transaction[]>([]);
+  const [myFlagsTotal, setMyFlagsTotal] = useState(0);
+  const [myFlagsLoading, setMyFlagsLoading] = useState(true);
+
+  useEffect(() => {
+    if (!analystEmail) return;
+    let alive = true;
+    const loadFlags = async () => {
+      try {
+        const page = await getTransactionsPage({
+          flagged_by: analystEmail,
+          limit: 10,
+          sort: "desc",
+        });
+        if (!alive) return;
+        setMyFlags(page.items);
+        setMyFlagsTotal(page.total);
+      } catch (e) {
+        console.error("My flagged transactions failed:", e);
+      } finally {
+        if (alive) setMyFlagsLoading(false);
+      }
+    };
+    loadFlags();
+    const id = window.setInterval(loadFlags, 10000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, [analystEmail]);
+
+  const fmtWhen = (iso: string | null | undefined) =>
+    iso ? parseApiTimestamp(iso).toLocaleString("en-NG", {
+      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"
+    }) : "—";
+
+  const flagRiskBadge = (level: string | null) => {
+    switch (level) {
+      case "LOW":
+        return <span className="bg-brand-success/15 text-brand-success px-2 py-0.5 rounded text-xs font-semibold">LOW</span>;
+      case "MEDIUM":
+        return <span className="bg-brand-warning/15 text-brand-warning px-2 py-0.5 rounded text-xs font-semibold">MEDIUM</span>;
+      case "HIGH":
+        return <span className="bg-brand-danger/15 text-brand-danger px-2 py-0.5 rounded text-xs font-semibold">HIGH</span>;
+      default:
+        return <span className="bg-dark-border text-dark-muted px-2 py-0.5 rounded text-xs font-semibold">N/A</span>;
+    }
+  };
 
   // Format hourly trend data for recharts
   const chartData = metrics.hourly_trend.map(t => ({
@@ -109,6 +160,88 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         ))}
       </div>
+
+      {/* Analyst's own flagged work - analysts only, uniquely scoped to
+          claimed_by = this analyst's email (admins use the Review Queue) */}
+      {!isAdmin && (
+        <div className="bg-dark-card border border-dark-border rounded-xl p-5 shadow-glow-brand">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="h-10 w-10 rounded-lg bg-guard-orangeLight border border-guard-orange/30 flex items-center justify-center shrink-0">
+                <Flag className="h-5 w-5 text-guard-orange" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-lg font-semibold text-dark-text">My Flagged Transactions</h3>
+                <p className="text-xs text-dark-muted">Transactions you suspended for admin review — newest first</p>
+              </div>
+            </div>
+            <span className="self-start sm:self-auto inline-flex items-center gap-1.5 text-xs font-bold bg-guard-orangeLight border border-guard-orange/30 text-guard-orange px-3 py-1.5 rounded-full whitespace-nowrap">
+              <Flag className="h-3.5 w-3.5" /> {myFlagsTotal} flagged
+            </span>
+          </div>
+
+          {myFlagsLoading && myFlags.length === 0 ? (
+            <div className="py-10 text-center">
+              <Loader2 className="h-6 w-6 animate-spin text-guard-orange mx-auto" />
+              <p className="text-xs text-dark-muted mt-2">Loading your flagged transactions…</p>
+            </div>
+          ) : myFlags.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider">
+                  <tr>
+                    <th className="px-3 py-3">Flagged At</th>
+                    <th className="px-3 py-3">Transaction ID</th>
+                    <th className="px-3 py-3">User Account</th>
+                    <th className="px-3 py-3 text-right">Amount</th>
+                    <th className="px-3 py-3 text-center">Risk</th>
+                    <th className="px-3 py-3">Current Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
+                  {myFlags.map((row) => (
+                    <tr key={row.transaction_id} className="hover:bg-dark-border/10 transition">
+                      <td className="px-3 py-3 text-xs text-dark-muted font-semibold whitespace-nowrap">
+                        <span className="flex items-center gap-1.5">
+                          <Clock className="h-3.5 w-3.5" />
+                          {fmtWhen(row.claimed_at || row.created_at)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 font-mono text-xs font-semibold text-dark-text">{row.transaction_id}</td>
+                      <td className="px-3 py-3 text-dark-text font-medium">{row.user_id}</td>
+                      <td className="px-3 py-3 text-dark-text font-bold text-right">₦{row.amount.toLocaleString("en-NG")}</td>
+                      <td className="px-3 py-3 text-center">{flagRiskBadge(row.risk_level)}</td>
+                      <td className="px-3 py-3">
+                        {row.status === "SUSPENDED" ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-guard-orange bg-guard-orangeLight border border-guard-orange/30 px-2 py-0.5 rounded">
+                            <Clock className="h-3 w-3" /> Awaiting admin review
+                          </span>
+                        ) : row.status === "APPROVED" ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-brand-success bg-brand-success/10 px-2 py-0.5 rounded">
+                            <ShieldCheck className="h-3 w-3" /> Approved{row.resolved_by ? ` by ${row.resolved_by}` : ""}
+                          </span>
+                        ) : row.status === "BLOCKED" ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-brand-danger bg-brand-danger/10 px-2 py-0.5 rounded">
+                            <ShieldAlert className="h-3 w-3" /> Blocked{row.resolved_by ? ` by ${row.resolved_by}` : ""}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-dark-muted font-semibold">{row.status}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="py-8 text-center text-xs text-dark-muted">
+              <Flag className="h-8 w-8 text-dark-muted/50 mx-auto mb-2" />
+              You haven't flagged any transactions yet. Suspend a medium-risk result from the
+              Live Monitor or Transaction Analyzer and it will appear here.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Admin Review Queue summary - admins only */}
       {isAdmin && (

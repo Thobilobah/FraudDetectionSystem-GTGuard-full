@@ -96,6 +96,7 @@ export interface TransactionPageParams {
   risk_level?: string;
   status?: string;
   sort?: "desc" | "asc";
+  flagged_by?: string;
 }
 
 export const getTransactionsPage = async (params: TransactionPageParams = {}): Promise<TransactionPage> => {

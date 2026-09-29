@@ -682,10 +682,12 @@ class TransactionRepository:
             return [dict(row) for row in cursor.fetchall()]
 
     @staticmethod
-    def _build_filters(search: str, risk_level: str, status: str) -> tuple:
+    def _build_filters(search: str, risk_level: str, status: str, flagged_by: str = "") -> tuple:
         """Translate the pagination query params into (sql_fragment, params).
         Values are always bound as parameters (never f-string'd) to keep the
-        existing ? -> %s placeholder wrapper happy and injection safe."""
+        existing ? -> %s placeholder wrapper happy and injection safe.
+        `flagged_by` matches claimed_by exactly, so each analyst can list only
+        the transactions they personally flagged/routed to the admin."""
         clauses = []
         params = []
         if search:
@@ -705,17 +707,20 @@ class TransactionRepository:
             else:
                 clauses.append("status = ?")
                 params.append(status)
+        if flagged_by:
+            clauses.append("claimed_by = ?")
+            params.append(flagged_by)
         where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         return where_sql, params
 
     def get_transactions_page(self, limit: int = 50, offset: int = 0,
                               search: str = "", risk_level: str = "", status: str = "",
-                              sort: str = "desc") -> list:
+                              sort: str = "desc", flagged_by: str = "") -> list:
         """Paginated, filtered transaction listing for the ledger. ORDER BY
         rides idx_txn_created; filters are bound params. `sort` is whitelisted
         (desc|asc) so it can never inject SQL."""
         order = "ASC" if sort == "asc" else "DESC"
-        where_sql, params = self._build_filters(search, risk_level, status)
+        where_sql, params = self._build_filters(search, risk_level, status, flagged_by)
         with self.get_connection() as conn:
             cursor = conn.execute(f"""
                 SELECT * FROM transactions
@@ -725,8 +730,9 @@ class TransactionRepository:
             """, tuple(params))
             return [dict(row) for row in cursor.fetchall()]
 
-    def count_transactions(self, search: str = "", risk_level: str = "", status: str = "") -> int:
-        where_sql, params = self._build_filters(search, risk_level, status)
+    def count_transactions(self, search: str = "", risk_level: str = "", status: str = "",
+                           flagged_by: str = "") -> int:
+        where_sql, params = self._build_filters(search, risk_level, status, flagged_by)
         with self.get_connection() as conn:
             cursor = conn.execute(f"SELECT COUNT(*) AS total FROM transactions {where_sql}", tuple(params))
             return cursor.fetchone()["total"]

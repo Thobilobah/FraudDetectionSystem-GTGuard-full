@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { Transaction } from "../types";
 import {
   Inbox, ShieldCheck, ShieldAlert, Flag, Loader2, ChevronLeft, ChevronRight,
-  CheckCircle2, Ban, Clock
+  CheckCircle2, Ban, Clock, Search, X
 } from "lucide-react";
 import { getStoredUser, getTransactionsPage, resolveTransaction } from "../services/api";
 import { useToast } from "../context/ToastContext";
@@ -32,6 +32,12 @@ export const ReviewQueue: React.FC = () => {
   const [pageSize, setPageSize] = useState(25);
   const [pendingTotal, setPendingTotal] = useState(0);
   const [completedTotal, setCompletedTotal] = useState(0);
+  // listTotal = the CURRENT tab's list size, honoring any applied search, so
+  // pagination/footer track the filtered rows while the header counters stay
+  // global (real pending/completed workload numbers).
+  const [listTotal, setListTotal] = useState(0);
+  const [searchInput, setSearchInput] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState("");
   const [rows, setRows] = useState<Transaction[]>([]);
   const [fetching, setFetching] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -53,9 +59,11 @@ export const ReviewQueue: React.FC = () => {
         ]),
         getTransactionsPage({
           status: tab === "pending" ? "SUSPENDED" : "RESOLVED",
+          search: appliedSearch,
           limit: pageSize,
           offset: page * pageSize,
-          sort: tab === "pending" ? "asc" : "desc",
+          // Newest first on BOTH tabs - the freshest work is always on top.
+          sort: "desc",
         }),
       ]);
       const newPending = counts[0].total;
@@ -67,7 +75,9 @@ export const ReviewQueue: React.FC = () => {
       setPendingTotal(newPending);
       setCompletedTotal(counts[1].total);
       setRows(pageData.items);
-      // Snap back if the page emptied (e.g. last pending row was resolved).
+      setListTotal(pageData.total);
+      // Snap back if the page emptied (e.g. last pending row was resolved,
+      // or a search narrowed the results below the current page).
       if (pageData.items.length === 0 && pageData.total > 0 && page > 0) {
         setPage(Math.max(0, Math.ceil(pageData.total / pageSize) - 1));
       }
@@ -77,13 +87,25 @@ export const ReviewQueue: React.FC = () => {
     } finally {
       setFetching(false);
     }
-  }, [isAdmin, tab, page, pageSize]);
+  }, [isAdmin, tab, page, pageSize, appliedSearch]);
 
   useEffect(() => {
     refresh();
     const id = window.setInterval(refresh, POLL_MS);
     return () => window.clearInterval(id);
   }, [refresh]);
+
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setAppliedSearch(searchInput.trim());
+    setPage(0);
+  };
+
+  const clearSearch = () => {
+    setSearchInput("");
+    setAppliedSearch("");
+    setPage(0);
+  };
 
   const handleResolve = async (txnId: string, decision: "APPROVED" | "BLOCKED") => {
     setResolvingId(txnId);
@@ -116,8 +138,8 @@ export const ReviewQueue: React.FC = () => {
     );
   }
 
-  const totalPages = Math.max(1, Math.ceil((tab === "pending" ? pendingTotal : completedTotal) / pageSize));
-  const total = tab === "pending" ? pendingTotal : completedTotal;
+  const totalPages = Math.max(1, Math.ceil(listTotal / pageSize));
+  const total = listTotal;
   const fromRow = total === 0 ? 0 : page * pageSize + 1;
   const toRow = Math.min(total, page * pageSize + rows.length);
 
@@ -208,6 +230,36 @@ export const ReviewQueue: React.FC = () => {
           Live · refreshes every {POLL_MS / 1000}s
         </div>
       </div>
+
+      {/* Search: by Transaction ID or User Account, applied via the button */}
+      <form onSubmit={handleSearchSubmit} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+        <div className="relative flex-1 max-w-md">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-dark-muted pointer-events-none" />
+          <input
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search by Transaction ID or User Account…"
+            aria-label="Search by transaction ID or user account"
+            className="w-full bg-dark-card border border-dark-border text-dark-text text-sm rounded-lg pl-9 pr-3 py-2 focus:border-guard-orange focus:outline-none placeholder:text-dark-muted"
+          />
+        </div>
+        <button
+          type="submit"
+          className="inline-flex items-center justify-center gap-1.5 text-xs font-bold px-4 py-2 rounded-lg bg-guard-orange text-white border border-guard-orange hover:bg-guard-orange/90 transition"
+        >
+          <Search className="h-3.5 w-3.5" /> Search
+        </button>
+        {appliedSearch && (
+          <button
+            type="button"
+            onClick={clearSearch}
+            className="inline-flex items-center justify-center gap-1.5 text-xs font-bold px-3 py-2 rounded-lg bg-dark-card border border-dark-border text-dark-muted hover:text-dark-text hover:border-guard-orange transition"
+          >
+            <X className="h-3.5 w-3.5" /> Clear
+            <span className="font-mono text-dark-text">"{appliedSearch}"</span>
+          </button>
+        )}
+      </form>
 
       {/* Table */}
       <div className="bg-dark-card border border-dark-border rounded-xl shadow-glow-brand overflow-hidden">
@@ -329,6 +381,11 @@ export const ReviewQueue: React.FC = () => {
             <div className="py-20 text-center text-dark-muted text-xs">
               {loadError ? (
                 <span className="text-brand-danger">{loadError}</span>
+              ) : appliedSearch ? (
+                <>
+                  <Search className="h-8 w-8 mx-auto mb-3" />
+                  No transactions match "{appliedSearch}".
+                </>
               ) : tab === "pending" ? (
                 <>
                   <CheckCircle2 className="h-8 w-8 text-brand-success mx-auto mb-3" />
@@ -349,6 +406,7 @@ export const ReviewQueue: React.FC = () => {
           <span className="text-xs text-dark-muted font-semibold">
             Showing <span className="text-dark-text">{fromRow}</span>–<span className="text-dark-text">{toRow}</span> of{" "}
             <span className="text-dark-text">{total.toLocaleString()}</span>
+            {appliedSearch && <span className="text-dark-muted"> matching "{appliedSearch}"</span>}
             {loadError && <span className="text-brand-danger ml-2">{loadError}</span>}
           </span>
           <div className="flex items-center gap-3">

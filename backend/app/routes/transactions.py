@@ -18,6 +18,7 @@ def get_transactions(
     risk_level: str = Query("", description="LOW | MEDIUM | HIGH (empty = all)"),
     status: str = Query("", description="APPROVED | PENDING | SUSPENDED | BLOCKED | RESOLVED (= APPROVED+BLOCKED) (empty = all)"),
     sort: str = Query("desc", description="desc (newest first) or asc (oldest first)"),
+    flagged_by: str = Query("", description="Exact claimant email - each analyst's own flagged work"),
 ):
     try:
         # Paginated + filtered ledger. Returns {items, total, limit, offset} so
@@ -27,10 +28,11 @@ def get_transactions(
         txns = db_repo.get_transactions_page(
             limit=limit, offset=offset,
             search=search.strip(), risk_level=risk_level.strip(), status=status.strip(),
-            sort=sort,
+            sort=sort, flagged_by=flagged_by.strip(),
         )
         total = db_repo.count_transactions(
-            search=search.strip(), risk_level=risk_level.strip(), status=status.strip()
+            search=search.strip(), risk_level=risk_level.strip(), status=status.strip(),
+            flagged_by=flagged_by.strip(),
         )
 
         # Deserialize JSON rules for frontend mapping
