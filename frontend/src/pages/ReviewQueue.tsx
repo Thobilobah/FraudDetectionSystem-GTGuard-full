@@ -2,9 +2,10 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { Transaction } from "../types";
 import {
   Inbox, ShieldCheck, ShieldAlert, Flag, Loader2, ChevronLeft, ChevronRight,
-  CheckCircle2, Ban, Clock, Search, X
+  CheckCircle2, Ban, Clock, Search, X, PauseCircle, AlertCircle, Activity,
+  MapPin, Tablet, UserCheck, Shield, User
 } from "lucide-react";
-import { getStoredUser, getTransactionsPage, resolveTransaction } from "../services/api";
+import { getStoredUser, getTransactionsPage, resolveTransaction, getTransactionById } from "../services/api";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
 
@@ -42,6 +43,8 @@ export const ReviewQueue: React.FC = () => {
   const [fetching, setFetching] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
+  // Row click -> detail modal (same analysis as the Live Monitor pane).
+  const [selectedTxn, setSelectedTxn] = useState<Transaction | null>(null);
 
   // Bump animation on the big counter when pending work INCREASES.
   const [counterBump, setCounterBump] = useState(false);
@@ -107,10 +110,34 @@ export const ReviewQueue: React.FC = () => {
     setPage(0);
   };
 
+  // Open the detail modal: show the clicked row instantly, then re-fetch the
+  // single record so stamps/rules are fresh (another admin may have just
+  // resolved it while we were looking at the list).
+  const openDetail = (txn: Transaction) => {
+    setSelectedTxn(txn);
+    getTransactionById(txn.transaction_id)
+      .then((fresh) => setSelectedTxn(fresh))
+      .catch(() => { /* keep the row data if the fetch fails */ });
+  };
+
+  // Escape closes the modal.
+  useEffect(() => {
+    if (!selectedTxn) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelectedTxn(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedTxn]);
+
   const handleResolve = async (txnId: string, decision: "APPROVED" | "BLOCKED") => {
     setResolvingId(txnId);
     try {
-      await resolveTransaction(txnId, decision);
+      const updated = await resolveTransaction(txnId, decision);
+      // Keep an open modal in sync with the fresh server row.
+      if (selectedTxn?.transaction_id === txnId) {
+        setSelectedTxn({ ...selectedTxn, ...updated });
+      }
       showToast(
         "success",
         decision === "APPROVED" ? "Transaction approved" : "Transaction blocked",
@@ -300,7 +327,11 @@ export const ReviewQueue: React.FC = () => {
 
                 {/* PENDING ROWS */}
                 {tab === "pending" && rows.map((row) => (
-                  <tr key={row.transaction_id} className="hover:bg-dark-border/10 transition">
+                  <tr
+                    key={row.transaction_id}
+                    onClick={() => openDetail(row)}
+                    className="hover:bg-dark-border/10 transition cursor-pointer"
+                  >
                     <td className="px-3 py-3.5 text-xs text-dark-muted font-semibold whitespace-nowrap">
                       <span className="flex items-center gap-1.5">
                         <Clock className="h-3.5 w-3.5" />
@@ -318,7 +349,7 @@ export const ReviewQueue: React.FC = () => {
                       )}
                     </td>
                     <td className="px-3 py-3.5">
-                      <div className="flex gap-2 justify-end">
+                      <div className="flex gap-2 justify-end" onClick={(e) => e.stopPropagation()}>
                         <button
                           disabled={resolvingId !== null}
                           onClick={() => handleResolve(row.transaction_id, "APPROVED")}
@@ -344,7 +375,11 @@ export const ReviewQueue: React.FC = () => {
 
                 {/* COMPLETED ROWS */}
                 {tab === "completed" && rows.map((row) => (
-                  <tr key={row.transaction_id} className="hover:bg-dark-border/10 transition">
+                  <tr
+                    key={row.transaction_id}
+                    onClick={() => openDetail(row)}
+                    className="hover:bg-dark-border/10 transition cursor-pointer"
+                  >
                     <td className="px-3 py-3.5">
                       {row.status === "BLOCKED" ? (
                         <span className="text-brand-danger font-bold text-xs flex items-center gap-1">
@@ -444,6 +479,193 @@ export const ReviewQueue: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Transaction detail modal - same analysis as the Live Monitor pane */}
+      {selectedTxn && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => setSelectedTxn(null)}
+          />
+          <div className="relative bg-dark-card border border-dark-border rounded-xl shadow-glow-brand w-full max-w-2xl max-h-[85vh] overflow-y-auto p-6">
+            <button
+              onClick={() => setSelectedTxn(null)}
+              aria-label="Close details"
+              className="absolute top-4 right-4 text-dark-muted hover:text-dark-text transition p-1 rounded-lg hover:bg-dark-border/30"
+            >
+              <X className="h-5 w-5" />
+            </button>
+
+            <div className="space-y-5">
+              {/* Header + status pill */}
+              <div className="border-b border-dark-border pb-4 pr-8">
+                <span className="text-[10px] text-guard-orange font-bold uppercase tracking-wider block">Detailed Analysis</span>
+                <div className="flex items-center gap-3 mt-1 flex-wrap">
+                  <h3 className="text-base font-mono font-bold text-dark-text">{selectedTxn.transaction_id}</h3>
+                  {selectedTxn.status === "SUSPENDED" ? (
+                    <span className="bg-guard-orangeLight text-guard-orange border border-guard-orange/30 rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
+                      <PauseCircle className="h-3.5 w-3.5" /> SUSPENDED
+                    </span>
+                  ) : selectedTxn.status === "PENDING" ? (
+                    <span className="bg-brand-info/10 text-brand-info border border-brand-info/30 rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
+                      <AlertCircle className="h-3.5 w-3.5" /> PENDING
+                    </span>
+                  ) : selectedTxn.status === "BLOCKED" ? (
+                    <span className="bg-brand-danger/10 text-brand-danger border border-dark-border rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
+                      <ShieldAlert className="h-3.5 w-3.5" /> FRAUD BLOCK
+                    </span>
+                  ) : (
+                    <span className="bg-brand-success/10 text-brand-success border border-dark-border rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
+                      <ShieldCheck className="h-3.5 w-3.5" /> PASS
+                    </span>
+                  )}
+                  {getRiskBadge(selectedTxn.risk_level)}
+                </div>
+              </div>
+
+              {/* Resolve panel for live (PENDING/SUSPENDED) work */}
+              {(selectedTxn.status === "SUSPENDED" || selectedTxn.status === "PENDING") && (
+                <div className="bg-guard-orangeLight border border-guard-orange/30 rounded-lg p-4 space-y-3">
+                  <p className="text-xs text-guard-orange font-semibold leading-relaxed">
+                    {selectedTxn.status === "PENDING"
+                      ? "This transaction is medium risk and awaiting action. An analyst can flag it for review, or you can resolve it directly."
+                      : "This transaction is held pending review. Funds will not move until you approve or block it."}
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      disabled={resolvingId === selectedTxn.transaction_id}
+                      onClick={() => handleResolve(selectedTxn.transaction_id, "APPROVED")}
+                      className="flex-1 bg-brand-success text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-success/90 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                    >
+                      {resolvingId === selectedTxn.transaction_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                      Approve Transaction
+                    </button>
+                    <button
+                      disabled={resolvingId === selectedTxn.transaction_id}
+                      onClick={() => handleResolve(selectedTxn.transaction_id, "BLOCKED")}
+                      className="flex-1 bg-brand-danger text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-danger/90 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                    >
+                      {resolvingId === selectedTxn.transaction_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Ban className="h-3.5 w-3.5" />}
+                      Block Transaction
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Analyst stamp */}
+              {selectedTxn.claimed_by && (
+                <div className="text-[11px] text-guard-orange bg-guard-orangeLight border border-guard-orange/30 rounded-lg px-3 py-2 flex items-center gap-2">
+                  <User className="h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    Flagged by <span className="font-semibold">{selectedTxn.claimed_by}</span>
+                    {selectedTxn.claimed_at && (
+                      <> at {fmtTime(selectedTxn.claimed_at)}</>
+                    )}
+                  </span>
+                </div>
+              )}
+
+              {/* Admin stamp */}
+              {selectedTxn.resolved_by && (
+                <div className="text-[11px] text-dark-muted bg-gray-50 dark:bg-white/5 border border-dark-border rounded-lg px-3 py-2">
+                  Resolved by <span className="font-semibold text-dark-text">{selectedTxn.resolved_by}</span>
+                  {selectedTxn.resolved_at && (
+                    <> at {fmtTime(selectedTxn.resolved_at)}</>
+                  )}
+                </div>
+              )}
+
+              {/* Stats grid */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-gray-50/50 dark:bg-white/5 border border-dark-border p-3 rounded-lg">
+                  <span className="text-[10px] text-dark-muted block uppercase">Amount (NGN)</span>
+                  <span className="text-lg font-bold text-dark-text">₦{selectedTxn.amount.toLocaleString("en-NG")}</span>
+                </div>
+                <div className="bg-gray-50/50 dark:bg-white/5 border border-dark-border p-3 rounded-lg">
+                  <span className="text-[10px] text-dark-muted block uppercase">Risk Probability</span>
+                  <span className="text-lg font-bold text-dark-text">
+                    {selectedTxn.fraud_probability !== null ? `${(selectedTxn.fraud_probability * 100).toFixed(1)}%` : "0.0%"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Context info */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="flex items-start gap-3 text-xs">
+                  <UserCheck className="h-4 w-4 text-guard-orange shrink-0 mt-0.5" />
+                  <div>
+                    <span className="text-dark-muted block font-semibold">User Account</span>
+                    <span className="text-dark-text font-mono">{selectedTxn.user_id}</span>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3 text-xs">
+                  <Shield className="h-4 w-4 text-guard-orange shrink-0 mt-0.5" />
+                  <div>
+                    <span className="text-dark-muted block font-semibold">Beneficiary Account Address</span>
+                    <span className="text-dark-text font-mono">{selectedTxn.beneficiary_id}</span>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3 text-xs">
+                  <Activity className="h-4 w-4 text-guard-orange shrink-0 mt-0.5" />
+                  <div>
+                    <span className="text-dark-muted block font-semibold">Payment Channel / Method</span>
+                    <span className="text-dark-text font-bold uppercase text-[10px] bg-gray-100 dark:bg-white/10 border border-gray-200 dark:border-dark-border px-2 py-0.5 rounded tracking-wider inline-block mt-0.5">
+                      {selectedTxn.payment_method || "USSD"}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3 text-xs">
+                  <Tablet className="h-4 w-4 text-guard-orange shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <span className="text-dark-muted block font-semibold">Device fingerprint</span>
+                    <span className="text-dark-text font-mono truncate block">{selectedTxn.device_id}</span>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3 text-xs sm:col-span-2">
+                  <MapPin className="h-4 w-4 text-guard-orange shrink-0 mt-0.5" />
+                  <div>
+                    <span className="text-dark-muted block font-semibold">Geo location coordinates</span>
+                    <span className="text-dark-text font-mono text-xs">
+                      {selectedTxn.location_latitude.toFixed(4)}, {selectedTxn.location_longitude.toFixed(4)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Rule violations explanation */}
+              <div className="border-t border-dark-border pt-4">
+                <h4 className="text-xs font-bold uppercase text-dark-text mb-2.5">Rule Violations Explanations</h4>
+                <div className="space-y-2">
+                  {selectedTxn.triggered_rules && selectedTxn.triggered_rules.length > 0 ? (
+                    selectedTxn.triggered_rules.map((rule, idx) => (
+                      <div
+                        key={idx}
+                        className={`text-xs border rounded-lg p-2.5 ${
+                          rule.severity === "CRITICAL"
+                            ? "bg-brand-danger/5 border-brand-danger/20 text-brand-danger"
+                            : rule.severity === "WARNING"
+                            ? "bg-brand-warning/5 border-brand-warning/20 text-brand-warning"
+                            : "bg-brand-info/5 border-brand-info/20 text-brand-info"
+                        }`}
+                      >
+                        <div className="font-bold flex items-center gap-1">
+                          <AlertCircle className="h-3.5 w-3.5" />
+                          {rule.rule_name}
+                        </div>
+                        <p className="mt-0.5 text-dark-text leading-normal">{rule.message}</p>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-xs text-brand-success bg-brand-success/5 border border-brand-success/20 rounded-lg p-3 text-center font-medium">
+                      No rules triggered. Core features represent normal baseline behavior.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -138,6 +138,16 @@ export const suspendTransaction = async (transactionId: string): Promise<Transac
 };
 
 /**
+ * Fetch a single transaction with fresh stamps (claimed/resolved) and parsed
+ * rules - used when opening the Review Queue detail modal so the analysis
+ * always reflects the latest state, not a stale table row.
+ */
+export const getTransactionById = async (transactionId: string): Promise<Transaction> => {
+  const response = await api.get(`/transactions/${encodeURIComponent(transactionId)}`);
+  return response.data;
+};
+
+/**
  * Admin-only: downloads a CSV report for the given date range and triggers
  * a browser save-as, so an admin can see who claimed/resolved every
  * transaction without needing to open the dashboard.
