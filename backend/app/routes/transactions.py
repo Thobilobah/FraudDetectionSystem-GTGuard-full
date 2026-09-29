@@ -16,7 +16,7 @@ def get_transactions(
     offset: int = Query(0, ge=0),
     search: str = Query("", description="Partial match on transaction_id, user_id or beneficiary_id"),
     risk_level: str = Query("", description="LOW | MEDIUM | HIGH (empty = all)"),
-    status: str = Query("", description="APPROVED | PENDING | SUSPENDED | BLOCKED (empty = all)"),
+    status: str = Query("", description="APPROVED | PENDING | SUSPENDED | BLOCKED | RESOLVED (= APPROVED+BLOCKED) (empty = all)"),
     sort: str = Query("desc", description="desc (newest first) or asc (oldest first)"),
 ):
     try:

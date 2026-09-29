@@ -5,24 +5,31 @@ import {
   BarChart, Bar, Legend
 } from "recharts";
 import { 
-  ShieldAlert, ShieldCheck, Activity, Percent, ArrowUpRight, TrendingUp, AlertTriangle
+  ShieldAlert, ShieldCheck, Activity, Percent, ArrowUpRight, TrendingUp, AlertTriangle, Inbox
 } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
+import { getStoredUser } from "../services/api";
 
 interface DashboardProps {
   metrics: RealTimeMetrics;
   modelMeta: ModelMetadata | null;
   latestTransactions: Transaction[];
   onNavigate: (tab: string) => void;
+  // Admin Review Queue counters, polled by App every 10s (null for analysts).
+  pendingQueueCount?: number | null;
+  resolvedCount?: number | null;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ 
   metrics, 
   modelMeta, 
   latestTransactions,
-  onNavigate
+  onNavigate,
+  pendingQueueCount,
+  resolvedCount
 }) => {
   const { theme } = useTheme();
+  const isAdmin = getStoredUser()?.role === "admin";
   const gridStroke = theme === "dark" ? "#292C33" : "#E5E7EB";
   const axisStroke = "#9CA3AF"; // mid-gray reads fine on both light and dark backgrounds
   const highRiskAlerts = latestTransactions
@@ -102,6 +109,42 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         ))}
       </div>
+
+      {/* Admin Review Queue summary - admins only */}
+      {isAdmin && (
+        <button
+          onClick={() => onNavigate("review")}
+          className="w-full text-left bg-dark-card border border-guard-orange/40 rounded-xl p-5 shadow-glow-brand flex items-center justify-between gap-4 transition hover:border-guard-orange group"
+        >
+          <div className="flex items-center gap-4 min-w-0">
+            <div className="h-12 w-12 rounded-lg bg-guard-orangeLight border border-guard-orange/30 flex items-center justify-center shrink-0">
+              <Inbox className="h-6 w-6 text-guard-orange" />
+            </div>
+            <div className="min-w-0">
+              <span className="text-xs font-bold uppercase tracking-wider text-guard-orange block">Review Queue</span>
+              <span className="text-sm text-dark-text font-semibold block truncate">
+                {(pendingQueueCount ?? 0) > 0
+                  ? `${pendingQueueCount} transaction${pendingQueueCount === 1 ? "" : "s"} flagged by analysts awaiting your decision`
+                  : "No pending work — analysts haven't flagged anything right now"}
+              </span>
+              <span className="text-xs text-dark-muted block mt-0.5">
+                {resolvedCount ?? 0} completed review{(resolvedCount ?? 0) === 1 ? "" : "s"} stamped
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-4 shrink-0">
+            <div className="text-right">
+              <span className="text-4xl font-extrabold text-guard-orange block leading-none">
+                {pendingQueueCount ?? 0}
+              </span>
+              <span className="text-[10px] text-dark-muted font-bold uppercase tracking-wider">Pending</span>
+            </div>
+            <span className="text-guard-orange font-bold text-xs flex items-center gap-1 group-hover:gap-2 transition-all">
+              Open <ArrowUpRight className="h-3.5 w-3.5" />
+            </span>
+          </div>
+        </button>
+      )}
 
       {/* Grid of Chart & Alerts */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

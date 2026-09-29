@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { getHealth, getAnalytics, getTransactions, selectActiveModel, isAuthenticated, getStoredUser, logout } from "./services/api";
+import { getHealth, getAnalytics, getTransactions, getTransactionsPage, selectActiveModel, isAuthenticated, getStoredUser, logout } from "./services/api";
 import type { RealTimeMetrics, ModelMetadata, ModelComparison, FeatureImportance, Transaction } from "./types";
 import { useToast } from "./context/ToastContext";
 import { Dashboard } from "./pages/Dashboard";
@@ -8,10 +8,11 @@ import { TransactionAnalyzer } from "./pages/TransactionAnalyzer";
 import { ModelPerformance } from "./pages/ModelPerformance";
 import { TransactionHistory } from "./pages/TransactionHistory";
 import { SystemStatus } from "./pages/SystemStatus";
+import { ReviewQueue } from "./pages/ReviewQueue";
 import { Login } from "./pages/Login";
 import { 
   Shield, LayoutDashboard, Radio, Activity, BarChart2, History, Server,
-  Menu, X, AlertTriangle, ShieldCheck, LogOut, Moon, Sun
+  Menu, X, AlertTriangle, ShieldCheck, LogOut, Moon, Sun, Inbox
 } from "lucide-react";
 import { useTheme } from "./context/ThemeContext";
 
@@ -38,6 +39,11 @@ export default function App() {
   const [featureImportance, setFeatureImportance] = useState<FeatureImportance[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [activatingModel, setActivatingModel] = useState<string | null>(null);
+  // Admin Review Queue counters (admin accounts only, polled every 10s so
+  // the nav badge and dashboard card climb as analysts flag new work).
+  const [pendingQueueCount, setPendingQueueCount] = useState<number | null>(null);
+  const [resolvedCount, setResolvedCount] = useState<number | null>(null);
+  const isAdmin = currentUser?.role === "admin";
 
   const fetchAllData = async () => {
     try {
@@ -106,6 +112,37 @@ export default function App() {
     showToast("success", "Login successful", "Welcome back to GT GUARD.");
   };
 
+  // Admin-only: poll the two Review Queue totals. limit=1 so the server
+  // only has to return the count, not rows. Analysts never fetch these.
+  useEffect(() => {
+    if (!authed || !isAdmin) {
+      setPendingQueueCount(null);
+      setResolvedCount(null);
+      return;
+    }
+    let cancelled = false;
+    const fetchCounts = async () => {
+      try {
+        const [pending, resolved] = await Promise.all([
+          getTransactionsPage({ status: "SUSPENDED", limit: 1 }),
+          getTransactionsPage({ status: "RESOLVED", limit: 1 }),
+        ]);
+        if (!cancelled) {
+          setPendingQueueCount(pending.total);
+          setResolvedCount(resolved.total);
+        }
+      } catch (e) {
+        console.error("Failed to poll review queue counts:", e);
+      }
+    };
+    fetchCounts();
+    const id = window.setInterval(fetchCounts, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [authed, isAdmin]);
+
   const handleLogout = () => {
     logout();
     setAuthed(false);
@@ -131,6 +168,21 @@ export default function App() {
             modelMeta={modelMeta}
             latestTransactions={transactions}
             onNavigate={(tab) => setActiveTab(tab)}
+            pendingQueueCount={pendingQueueCount}
+            resolvedCount={resolvedCount}
+          />
+        );
+      case "review":
+        // Admin-only tab; the page itself also guards, and non-admins fall
+        // back to the dashboard so the route can never leak the queue view.
+        return isAdmin ? <ReviewQueue /> : (
+          <Dashboard
+            metrics={realTimeMetrics}
+            modelMeta={modelMeta}
+            latestTransactions={transactions}
+            onNavigate={(tab) => setActiveTab(tab)}
+            pendingQueueCount={pendingQueueCount}
+            resolvedCount={resolvedCount}
           />
         );
       case "monitor":
@@ -157,7 +209,16 @@ export default function App() {
       case "status":
         return <SystemStatus health={health} />;
       default:
-        return <Dashboard metrics={realTimeMetrics} modelMeta={modelMeta} latestTransactions={transactions} onNavigate={setActiveTab} />;
+        return (
+          <Dashboard
+            metrics={realTimeMetrics}
+            modelMeta={modelMeta}
+            latestTransactions={transactions}
+            onNavigate={setActiveTab}
+            pendingQueueCount={pendingQueueCount}
+            resolvedCount={resolvedCount}
+          />
+        );
     }
   };
 
@@ -199,6 +260,26 @@ export default function App() {
                 <Radio className="h-4.5 w-4.5" />
                 Live Monitor
               </button>
+
+              {/* Admin-only: work analysts flagged and routed for review */}
+              {isAdmin && (
+                <button
+                  onClick={() => setActiveTab("review")}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-semibold transition ${getActiveTabClass("review")}`}
+                >
+                  <Inbox className="h-4.5 w-4.5" />
+                  Review Queue
+                  <span
+                    className={`ml-auto min-w-[1.4rem] text-center text-[10px] font-bold rounded-full px-1.5 py-0.5 ${
+                      (pendingQueueCount ?? 0) > 0
+                        ? "bg-guard-orange text-white shadow-glow-brand"
+                        : "bg-dark-border text-dark-muted"
+                    }`}
+                  >
+                    {pendingQueueCount ?? 0}
+                  </span>
+                </button>
+              )}
 
               <button
                 onClick={() => setActiveTab("analyzer")}

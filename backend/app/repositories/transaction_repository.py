@@ -696,8 +696,15 @@ class TransactionRepository:
             clauses.append("risk_level = ?")
             params.append(risk_level)
         if status:
-            clauses.append("status = ?")
-            params.append(status)
+            if status.upper() == "RESOLVED":
+                # Virtual status for the admin Review Queue's Completed tab:
+                # every transaction an admin has decided on, in either
+                # direction, in one server-side paginated list.
+                clauses.append("status IN (?, ?)")
+                params.extend(["APPROVED", "BLOCKED"])
+            else:
+                clauses.append("status = ?")
+                params.append(status)
         where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         return where_sql, params
 
