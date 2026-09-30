@@ -1,7 +1,11 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import {
   generateDemoTransaction, predictFeatures, getFeatureExplanation, suspendTransaction, getStoredUser
 } from "../services/api";
+import {
+  startSimulation, stopSimulation, subscribeSimulation, getSimulationState,
+  setAutoStopHandler, type SimState
+} from "../services/simulationStream";
 import type { TriggeredRule } from "../types";
 import { 
   Activity, ShieldAlert, ShieldCheck, HelpCircle, Terminal, RefreshCw, Send, Sliders, PauseCircle, Loader2, Play, StopCircle
@@ -67,27 +71,24 @@ export const TransactionAnalyzer: React.FC = () => {
   const [isLoadingManual, setIsLoadingManual] = useState(false);
   const [isSuspending, setIsSuspending] = useState(false);
 
-  // Real-time simulation stream: Start spins an async loop that generates a
-  // random scenario (weighted 50% LOW / 30% MEDIUM / 20% HIGH) and runs it
-  // through the live model every ~5s; Stop ends it gracefully after the
-  // in-flight tick. Each result is saved server-side, so streamed rows show
-  // up in the Live Monitor / Review Queue / dashboard like real traffic.
-  const [simRunning, setSimRunning] = useState(false);
-  const [simFeed, setSimFeed] = useState<Array<{
-    transaction_id: string; user_id: string; amount: number;
-    risk_level: string; risk_score: number | null; status: string;
-    at: Date;
-  }>>([]);
-  const [simStats, setSimStats] = useState({ total: 0, LOW: 0, MEDIUM: 0, HIGH: 0 });
-  const simRunningRef = useRef(false);
-  // Monotonic token so a Stop->Start restart always orphans the previous
-  // loop (even if it is mid-sleep) instead of running two streams at once.
-  const simTokenRef = useRef(0);
+  // Real-time simulation stream: the loop itself lives in the module-level
+  // simulationStream service, so it keeps running while the user navigates
+  // other pages - this component merely SUBSCRIBES to its state for display
+  // and only stops it when the user presses Stop.
+  const [sim, setSim] = useState<SimState>(getSimulationState);
 
-  useEffect(() => () => {
-    simRunningRef.current = false;
-    simTokenRef.current += 1;
-  }, []);
+  useEffect(() => {
+    const unsubscribe = subscribeSimulation(() => setSim(getSimulationState()));
+    setAutoStopHandler((message) =>
+      showToast("danger", "Simulation stopped", message)
+    );
+    return () => {
+      unsubscribe();
+      setAutoStopHandler(null);
+      // Deliberately does NOT stop the stream: leaving the page must not
+      // end the simulation.
+    };
+  }, [showToast]);
 
   // Analysts (non-admins) can suspend a MEDIUM-risk result straight from
   // the analyzer: PATCH /transactions/{id}/suspend moves it PENDING ->
@@ -203,85 +204,6 @@ export const TransactionAnalyzer: React.FC = () => {
       ...prev,
       [key]: value
     }));
-  };
-
-  const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
-
-  // Weighted scenario pick: mostly genuine traffic, a decent slice of
-  // suspicious events, occasional outright fraud attempts.
-  const pickRandomScenario = (): "normal" | "suspicious" | "high_risk" => {
-    const roll = Math.random() * 100;
-    if (roll < 50) return "normal";
-    if (roll < 80) return "suspicious";
-    return "high_risk";
-  };
-
-  const stopSimulation = () => {
-    simTokenRef.current += 1; // orphan any in-flight loop immediately
-    simRunningRef.current = false;
-    setSimRunning(false);
-  };
-
-  const startSimulation = async () => {
-    if (simRunningRef.current) return;
-    const token = ++simTokenRef.current;
-    simRunningRef.current = true;
-    setSimRunning(true);
-    setSimFeed([]);
-    setSimStats({ total: 0, LOW: 0, MEDIUM: 0, HIGH: 0 });
-    let consecutiveFailures = 0;
-
-    while (simRunningRef.current && simTokenRef.current === token) {
-      try {
-        const scenario = pickRandomScenario();
-        const data = await generateDemoTransaction(scenario);
-        const result = await predictFeatures({
-          ...(data.engineered_features || {}),
-          user_id: data.user_id,
-          beneficiary_id: data.beneficiary_id,
-          device_id: data.device_id,
-          timestamp: data.timestamp,
-          location_latitude: data.location_latitude,
-          location_longitude: data.location_longitude,
-          payment_method: data.payment_method,
-        });
-        consecutiveFailures = 0;
-        // Keep the row even if Stop landed mid-request: the transaction was
-        // really scored and saved, so hiding it would be misleading.
-        const level = (result.risk_level || "LOW").toUpperCase();
-        const row = {
-          transaction_id: result.transaction_id || "txn_unknown",
-          user_id: data.user_id,
-          amount: data.amount,
-          risk_level: level,
-          risk_score: result.risk_score ?? null,
-          status: result.status || "APPROVED",
-          at: new Date(),
-        };
-        setSimFeed((prev) => [row, ...prev].slice(0, 20));
-        setSimStats((prev) => ({
-          total: prev.total + 1,
-          LOW: prev.LOW + (level === "LOW" ? 1 : 0),
-          MEDIUM: prev.MEDIUM + (level === "MEDIUM" ? 1 : 0),
-          HIGH: prev.HIGH + (level === "HIGH" ? 1 : 0),
-        }));
-      } catch (e) {
-        consecutiveFailures += 1;
-        if (consecutiveFailures >= 3) {
-          showToast("danger", "Simulation stopped", "The stream hit repeated errors (rate limit or server issue) and stopped automatically.");
-          break;
-        }
-      }
-      if (simRunningRef.current && simTokenRef.current === token) {
-        await sleep(5000);
-      }
-    }
-
-    // Only the loop that still owns the token may clear the running state.
-    if (simTokenRef.current === token) {
-      simRunningRef.current = false;
-      setSimRunning(false);
-    }
   };
 
   const getRiskBadge = (level: string) => {
@@ -630,7 +552,7 @@ export const TransactionAnalyzer: React.FC = () => {
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-dark-border pb-4">
             <div>
               <h3 className="text-lg font-semibold text-dark-text flex items-center gap-2">
-                {simRunning && (
+                {sim.running && (
                   <span className="relative flex h-2.5 w-2.5">
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-success opacity-75"></span>
                     <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-brand-success"></span>
@@ -639,7 +561,7 @@ export const TransactionAnalyzer: React.FC = () => {
                 Real-Time Simulation Stream
               </h3>
               <p className="text-xs text-dark-muted mt-0.5">
-                {simRunning
+                {sim.running
                   ? "Generating random transactions through the live model every ~5s — results also land in the Live Monitor."
                   : "Start the stream to generate random transactions (50% low, 30% medium, 20% high risk) through the live model."}
               </p>
@@ -647,19 +569,19 @@ export const TransactionAnalyzer: React.FC = () => {
             <div className="flex items-center gap-2 shrink-0">
               <div className="flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-dark-bg border border-dark-border">
                 <Activity className="h-3.5 w-3.5 text-dark-muted" />
-                <span className="text-dark-text">{simStats.total}</span>
+                <span className="text-dark-text">{sim.stats.total}</span>
                 <span className="text-dark-muted">simulated</span>
               </div>
               <span className="text-[11px] font-bold px-2 py-1.5 rounded-lg bg-brand-success/10 border border-brand-success/20 text-brand-success">
-                {simStats.LOW} LOW
+                {sim.stats.LOW} LOW
               </span>
               <span className="text-[11px] font-bold px-2 py-1.5 rounded-lg bg-brand-warning/10 border border-brand-warning/20 text-brand-warning">
-                {simStats.MEDIUM} MED
+                {sim.stats.MEDIUM} MED
               </span>
               <span className="text-[11px] font-bold px-2 py-1.5 rounded-lg bg-brand-danger/10 border border-brand-danger/20 text-brand-danger">
-                {simStats.HIGH} HIGH
+                {sim.stats.HIGH} HIGH
               </span>
-              {simRunning ? (
+              {sim.running ? (
                 <button
                   onClick={stopSimulation}
                   className="inline-flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-lg bg-brand-danger text-white border border-brand-danger hover:bg-brand-danger/90 transition"
@@ -677,9 +599,9 @@ export const TransactionAnalyzer: React.FC = () => {
             </div>
           </div>
 
-          {simFeed.length > 0 ? (
+          {sim.feed.length > 0 ? (
             <ul className="space-y-1.5 max-h-72 overflow-y-auto">
-              {simFeed.map((row, idx) => (
+              {sim.feed.map((row, idx) => (
                 <li
                   key={`${row.transaction_id}-${idx}`}
                   className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs px-3 py-2 rounded-lg border ${
@@ -714,7 +636,7 @@ export const TransactionAnalyzer: React.FC = () => {
           ) : (
             <div className="py-8 text-center text-xs text-dark-muted">
               <Play className="h-7 w-7 text-dark-border mx-auto mb-2" />
-              {simRunning ? "Waiting for the first transaction…" : "Press Start to begin the live stream."}
+              {sim.running ? "Waiting for the first transaction…" : "Press Start to begin the live stream."}
             </div>
           )}
         </div>
