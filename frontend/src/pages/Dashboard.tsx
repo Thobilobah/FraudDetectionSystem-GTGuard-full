@@ -8,7 +8,7 @@ import {
   ShieldAlert, ShieldCheck, Activity, Percent, ArrowUpRight, TrendingUp, AlertTriangle, Inbox, Flag, Loader2, Clock
 } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
-import { getStoredUser, getTransactionsPage } from "../services/api";
+import { getStoredUser, getTransactionsPage, type QueueMetrics } from "../services/api";
 import { parseApiTimestamp } from "../utils/time";
 
 interface DashboardProps {
@@ -19,6 +19,8 @@ interface DashboardProps {
   // Admin Review Queue counters, polled by App every 10s (null for analysts).
   pendingQueueCount?: number | null;
   resolvedCount?: number | null;
+  // Full queue stats (median resolve time, oldest waiting) for the admin card.
+  queueMetrics?: QueueMetrics | null;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ 
@@ -27,7 +29,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   latestTransactions,
   onNavigate,
   pendingQueueCount,
-  resolvedCount
+  resolvedCount,
+  queueMetrics
 }) => {
   const { theme } = useTheme();
   const isAdmin = getStoredUser()?.role === "admin";
@@ -73,6 +76,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
     iso ? parseApiTimestamp(iso).toLocaleString("en-NG", {
       month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"
     }) : "—";
+
+  // Compact minutes -> "45m" / "2h 14m" for the queue stats.
+  const fmtMins = (mins: number) => {
+    const m = Math.max(0, Math.round(mins));
+    if (m < 60) return `${m}m`;
+    return `${Math.floor(m / 60)}h ${m % 60}m`;
+  };
 
   const flagRiskBadge = (level: string | null) => {
     switch (level) {
@@ -263,6 +273,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <span className="text-xs text-dark-muted block mt-0.5">
                 {resolvedCount ?? 0} completed review{(resolvedCount ?? 0) === 1 ? "" : "s"} stamped
               </span>
+              {queueMetrics && (
+                <span className="text-xs text-dark-muted block mt-0.5">
+                  Median decision time {fmtMins(queueMetrics.median_resolve_minutes)} · oldest waiting{" "}
+                  {fmtMins(queueMetrics.oldest_pending_minutes)}
+                </span>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-4 shrink-0">

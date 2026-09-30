@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { getHealth, getAnalytics, getTransactions, getTransactionsPage, selectActiveModel, isAuthenticated, getStoredUser, logout } from "./services/api";
+import { getHealth, getAnalytics, getTransactions, selectActiveModel, isAuthenticated, getStoredUser, logout, getQueueMetrics, runAutoResolve, type QueueMetrics } from "./services/api";
 import type { RealTimeMetrics, ModelMetadata, ModelComparison, FeatureImportance, Transaction } from "./types";
 import { useToast } from "./context/ToastContext";
 import { Dashboard } from "./pages/Dashboard";
@@ -40,9 +40,13 @@ export default function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [activatingModel, setActivatingModel] = useState<string | null>(null);
   // Admin Review Queue counters (admin accounts only, polled every 10s so
-  // the nav badge and dashboard card climb as analysts flag new work).
+  // the nav badge and dashboard card climb as analysts flag new work). One
+  // queue-metrics call now serves the badge, the dashboard card extras AND
+  // the two counts - and each poll also nudges the throttled auto-resolve
+  // sweep (server runs it at most once a minute, so this stays cheap).
   const [pendingQueueCount, setPendingQueueCount] = useState<number | null>(null);
   const [resolvedCount, setResolvedCount] = useState<number | null>(null);
+  const [queueMetrics, setQueueMetrics] = useState<QueueMetrics | null>(null);
   const isAdmin = currentUser?.role === "admin";
 
   const fetchAllData = async () => {
@@ -112,24 +116,25 @@ export default function App() {
     showToast("success", "Login successful", "Welcome back to GT GUARD.");
   };
 
-  // Admin-only: poll the two Review Queue totals. limit=1 so the server
-  // only has to return the count, not rows. Analysts never fetch these.
+  // Admin-only: poll queue stats + nudge the policy sweep. Analysts never
+  // fetch these (the sweep trigger runs inside this same admin poll).
   useEffect(() => {
     if (!authed || !isAdmin) {
       setPendingQueueCount(null);
       setResolvedCount(null);
+      setQueueMetrics(null);
       return;
     }
     let cancelled = false;
     const fetchCounts = async () => {
       try {
-        const [pending, resolved] = await Promise.all([
-          getTransactionsPage({ status: "SUSPENDED", limit: 1 }),
-          getTransactionsPage({ status: "RESOLVED", limit: 1 }),
-        ]);
+        // Fire-and-forget: the server self-throttles to one sweep/minute.
+        void runAutoResolve().catch(() => {});
+        const m = await getQueueMetrics();
         if (!cancelled) {
-          setPendingQueueCount(pending.total);
-          setResolvedCount(resolved.total);
+          setQueueMetrics(m);
+          setPendingQueueCount(m.pending);
+          setResolvedCount(m.completed_total);
         }
       } catch (e) {
         console.error("Failed to poll review queue counts:", e);
@@ -170,6 +175,7 @@ export default function App() {
             onNavigate={(tab) => setActiveTab(tab)}
             pendingQueueCount={pendingQueueCount}
             resolvedCount={resolvedCount}
+            queueMetrics={queueMetrics}
           />
         );
       case "review":

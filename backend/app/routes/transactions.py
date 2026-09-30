@@ -1,14 +1,23 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
 from backend.app.repositories.transaction_repository import db_repo
-from backend.app.schemas.transaction import ResolveTransactionRequest
+from backend.app.schemas.transaction import (
+    ResolveTransactionRequest, BulkSuspendRequest, BulkResolveRequest
+)
 from backend.app.auth import require_admin, get_current_user
 import json
 import csv
 import io
+import time
 from datetime import date
 
 router = APIRouter()
+
+# Server-side throttle for the policy sweep: dashboard polls fire it every
+# 10s, but the sweep itself only actually runs once per this interval, so
+# poll traffic costs a single timestamp comparison.
+_LAST_AUTO_RESOLVE_RUN = 0.0
+AUTO_RESOLVE_MIN_INTERVAL_S = 60.0
 
 @router.get("/transactions")
 def get_transactions(
@@ -17,14 +26,14 @@ def get_transactions(
     search: str = Query("", description="Partial match on transaction_id, user_id or beneficiary_id"),
     risk_level: str = Query("", description="LOW | MEDIUM | HIGH (empty = all)"),
     status: str = Query("", description="APPROVED | PENDING | SUSPENDED | BLOCKED | RESOLVED (= APPROVED+BLOCKED) (empty = all)"),
-    sort: str = Query("desc", description="desc (newest first) or asc (oldest first)"),
+    sort: str = Query("desc", description="desc (newest first) | asc (oldest first/ageing) | risk (highest risk score first)"),
     flagged_by: str = Query("", description="Exact claimant email - each analyst's own flagged work"),
 ):
     try:
         # Paginated + filtered ledger. Returns {items, total, limit, offset} so
         # the history page can paginate the FULL history, not just a 100-row
         # poll cache. ORDER BY rides idx_txn_created; filters are bound params.
-        sort = sort if sort in ("desc", "asc") else "desc"
+        sort = sort if sort in ("desc", "asc", "risk") else "desc"
         txns = db_repo.get_transactions_page(
             limit=limit, offset=offset,
             search=search.strip(), risk_level=risk_level.strip(), status=status.strip(),
@@ -180,6 +189,104 @@ def resolve_transaction(
             updated["triggered_rules"] = []
 
     return updated
+
+
+@router.post("/transactions/bulk-suspend")
+def bulk_suspend_transactions(
+    payload: BulkSuspendRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Analyst batch-flag: same semantics as the single suspend, per row -
+    PENDING -> SUSPENDED with claimed_by stamped to this user. Rows that are
+    missing or no longer PENDING are reported as failures, not errors, so one
+    stale id never rolls back the rest of the batch."""
+    succeeded, failed = [], []
+    for txn_id in payload.transaction_ids:
+        result = db_repo.suspend_transaction(txn_id, flagged_by_email=current_user["email"])
+        if "error" in result:
+            failed.append({"transaction_id": txn_id, "reason": result["error"]})
+        else:
+            succeeded.append(txn_id)
+    return {"succeeded": succeeded, "failed": failed}
+
+
+@router.post("/transactions/bulk-resolve")
+def bulk_resolve_transactions(
+    payload: BulkResolveRequest,
+    current_user: dict = Depends(require_admin),
+):
+    """Admin batch decision: APPROVED or BLOCKED for up to 100 rows in one
+    round-trip. Statuses are checked up front so only PENDING/SUSPENDED work
+    is touched (resolved rows are reported as 'not_resolvable'), and each
+    success carries its own resolved_by/resolved_at stamp."""
+    decision = (payload.decision or "").strip().upper()
+    if decision not in ("APPROVED", "BLOCKED"):
+        raise HTTPException(status_code=400, detail="decision must be 'APPROVED' or 'BLOCKED'.")
+
+    ids = list(dict.fromkeys(payload.transaction_ids))  # de-dupe, keep order
+    with db_repo.get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT transaction_id, status FROM transactions WHERE transaction_id = ANY(?)",
+            (ids,),
+        )
+        statuses = {r["transaction_id"]: r["status"] for r in cursor.fetchall()}
+
+    succeeded, failed = [], []
+    for txn_id in ids:
+        status = statuses.get(txn_id)
+        if status is None:
+            failed.append({"transaction_id": txn_id, "reason": "not_found"})
+        elif status not in ("PENDING", "SUSPENDED"):
+            failed.append({"transaction_id": txn_id, "reason": "not_resolvable"})
+        else:
+            updated = db_repo.resolve_transaction(txn_id, decision, resolved_by=current_user["email"])
+            if updated:
+                succeeded.append(txn_id)
+            else:
+                failed.append({"transaction_id": txn_id, "reason": "not_found"})
+    return {"succeeded": succeeded, "failed": failed}
+
+
+@router.get("/transactions/queue-metrics")
+def get_queue_metrics(current_user: dict = Depends(require_admin)):
+    """Admin: one round-trip backlog/throughput stats for the Review Queue
+    strip, the nav badge and the dashboard card."""
+    try:
+        return db_repo.queue_metrics()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/transactions/auto-resolve-run")
+def run_auto_resolve(current_user: dict = Depends(get_current_user)):
+    """Policy sweep trigger - cheap enough for the dashboard's 10s poll: the
+    server only executes the sweep once per minute (throttled below), all
+    other calls return {'skipped': true} instantly. Conservative defaults:
+    unclaimed MEDIUM txns with score <= 45, untouched for 15 min, no CRITICAL
+    rules -> APPROVED as 'system:policy'. SUSPENDED rows are never touched."""
+    global _LAST_AUTO_RESOLVE_RUN
+    now = time.time()
+    if now - _LAST_AUTO_RESOLVE_RUN < AUTO_RESOLVE_MIN_INTERVAL_S:
+        return {"skipped": True, "resolved": 0}
+    _LAST_AUTO_RESOLVE_RUN = now
+    try:
+        return db_repo.run_auto_resolve_policy()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Auto-resolve sweep failed: {str(e)}")
+
+
+@router.get("/transactions/outcomes")
+def get_recent_outcomes(
+    risk_level: str = Query("MEDIUM", description="LOW | MEDIUM | HIGH"),
+    days: int = Query(7, ge=1, le=90),
+    current_user: dict = Depends(get_current_user),
+):
+    """Decision support for the detail modal: how transactions of this risk
+    level resolved over the last N days (base rate before you decide)."""
+    try:
+        return db_repo.recent_outcomes(risk_level=risk_level.upper(), days=days)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/transactions/{txn_id}")

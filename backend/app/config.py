@@ -39,6 +39,16 @@ class Settings:
     RISK_THRESHOLD_LOW: int = int(os.getenv("RISK_THRESHOLD_LOW", "40"))
     RISK_THRESHOLD_HIGH: int = int(os.getenv("RISK_THRESHOLD_HIGH", "70"))
 
+    # Policy auto-resolution (conservative defaults): unclaimed PENDING
+    # transactions in the very bottom of the MEDIUM band (40-45) with no
+    # CRITICAL rule hits, untouched for 15 minutes, are approved by policy.
+    # Anything higher, older-flagged (SUSPENDED), or CRITICAL-rule hit always
+    # waits for a human. Decisions are stamped resolved_by="system:policy".
+    AUTO_RESOLVE_ENABLED: bool = os.getenv("AUTO_RESOLVE_ENABLED", "true").lower() == "true"
+    AUTO_RESOLVE_AFTER_MIN: int = int(os.getenv("AUTO_RESOLVE_AFTER_MIN", "15"))
+    AUTO_RESOLVE_MAX_SCORE: int = int(os.getenv("AUTO_RESOLVE_MAX_SCORE", "45"))
+    AUTO_RESOLVE_BATCH: int = int(os.getenv("AUTO_RESOLVE_BATCH", "50"))
+
     # CORS: comma-separated allowlist of dashboard origins. Defaults to "*"
     # (any origin, credentials off) for demo simplicity; set CORS_ORIGINS in
     # production (e.g. "https://fraudguard-dashboard-eta.vercel.app") to lock

@@ -5,7 +5,9 @@ import {
   CheckCircle2, Ban, Clock, Search, X, PauseCircle, AlertCircle, Activity,
   MapPin, Tablet, UserCheck, Shield, User
 } from "lucide-react";
-import { getStoredUser, getTransactionsPage, resolveTransaction, getTransactionById } from "../services/api";
+import { getStoredUser, getTransactionsPage, resolveTransaction, getTransactionById,
+         bulkResolveTransactions, getQueueMetrics, getRecentOutcomes,
+         type QueueMetrics, type RecentOutcomes } from "../services/api";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
 
@@ -31,8 +33,12 @@ export const ReviewQueue: React.FC = () => {
   const [tab, setTab] = useState<"pending" | "completed">("pending");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
+  // Newest-first stays the default (as requested earlier); the dropdown adds
+  // oldest-first (ageing view) and highest-risk-first (triage view).
+  const [sortMode, setSortMode] = useState<"desc" | "asc" | "risk">("desc");
   const [pendingTotal, setPendingTotal] = useState(0);
   const [completedTotal, setCompletedTotal] = useState(0);
+  const [metrics, setMetrics] = useState<QueueMetrics | null>(null);
   // listTotal = the CURRENT tab's list size, honoring any applied search, so
   // pagination/footer track the filtered rows while the header counters stay
   // global (real pending/completed workload numbers).
@@ -45,6 +51,12 @@ export const ReviewQueue: React.FC = () => {
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   // Row click -> detail modal (same analysis as the Live Monitor pane).
   const [selectedTxn, setSelectedTxn] = useState<Transaction | null>(null);
+  // Decision-support stats shown inside the modal, fetched per opened row.
+  const [outcomes, setOutcomes] = useState<RecentOutcomes | null>(null);
+  // Bulk resolve: multi-select rows on the Pending tab, one batch call.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDecision, setBulkDecision] = useState<"APPROVED" | "BLOCKED" | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   // Bump animation on the big counter when pending work INCREASES.
   const [counterBump, setCounterBump] = useState(false);
@@ -55,28 +67,25 @@ export const ReviewQueue: React.FC = () => {
     setFetching(true);
     setLoadError(null);
     try {
-      const [counts, pageData] = await Promise.all([
-        Promise.all([
-          getTransactionsPage({ status: "SUSPENDED", limit: 1 }),
-          getTransactionsPage({ status: "RESOLVED", limit: 1 }),
-        ]),
+      const [m, pageData] = await Promise.all([
+        getQueueMetrics(),
         getTransactionsPage({
           status: tab === "pending" ? "SUSPENDED" : "RESOLVED",
           search: appliedSearch,
           limit: pageSize,
           offset: page * pageSize,
-          // Newest first on BOTH tabs - the freshest work is always on top.
-          sort: "desc",
+          sort: sortMode,
         }),
       ]);
-      const newPending = counts[0].total;
+      const newPending = m.pending;
       if (prevPending.current !== null && newPending > prevPending.current) {
         setCounterBump(true);
         window.setTimeout(() => setCounterBump(false), 500);
       }
       prevPending.current = newPending;
+      setMetrics(m);
       setPendingTotal(newPending);
-      setCompletedTotal(counts[1].total);
+      setCompletedTotal(m.completed_total);
       setRows(pageData.items);
       setListTotal(pageData.total);
       // Snap back if the page emptied (e.g. last pending row was resolved,
@@ -90,7 +99,7 @@ export const ReviewQueue: React.FC = () => {
     } finally {
       setFetching(false);
     }
-  }, [isAdmin, tab, page, pageSize, appliedSearch]);
+  }, [isAdmin, tab, page, pageSize, appliedSearch, sortMode]);
 
   useEffect(() => {
     refresh();
@@ -112,23 +121,95 @@ export const ReviewQueue: React.FC = () => {
 
   // Open the detail modal: show the clicked row instantly, then re-fetch the
   // single record so stamps/rules are fresh (another admin may have just
-  // resolved it while we were looking at the list).
+  // resolved it while we were looking at the list), plus the recent-outcomes
+  // base rate for this risk level as decision support.
   const openDetail = (txn: Transaction) => {
     setSelectedTxn(txn);
+    setOutcomes(null);
     getTransactionById(txn.transaction_id)
       .then((fresh) => setSelectedTxn(fresh))
       .catch(() => { /* keep the row data if the fetch fails */ });
+    getRecentOutcomes(txn.risk_level || "MEDIUM", 7)
+      .then(setOutcomes)
+      .catch(() => setOutcomes(null));
   };
 
-  // Escape closes the modal.
+  // Escape closes the modal; A = approve, B = block while a live
+  // (PENDING/SUSPENDED) transaction is open - ignored while typing in inputs.
   useEffect(() => {
     if (!selectedTxn) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSelectedTxn(null);
+      if (e.key === "Escape") {
+        setSelectedTxn(null);
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      const typing = !!target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+      if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+      const key = e.key.toLowerCase();
+      if ((key === "a" || key === "b") &&
+          (selectedTxn.status === "PENDING" || selectedTxn.status === "SUSPENDED") &&
+          resolvingId === null) {
+        handleResolve(selectedTxn.transaction_id, key === "a" ? "APPROVED" : "BLOCKED");
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedTxn]);
+  }, [selectedTxn, resolvingId]);
+
+  // Drop selections for rows that are no longer pending (resolved, rolled to
+  // another page, or moved by the 10s poll) so the bulk count stays truthful.
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const pendingNow = new Set(
+        rows.filter((r) => r.status === "SUSPENDED").map((r) => r.transaction_id)
+      );
+      const next = new Set([...prev].filter((id) => pendingNow.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [rows]);
+
+  const toggleSelect = (txnId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(txnId)) next.delete(txnId);
+      else next.add(txnId);
+      return next;
+    });
+    setBulkDecision(null);
+  };
+
+  const toggleSelectAll = () => {
+    const allSelected = rows.length > 0 && rows.every((r) => selectedIds.has(r.transaction_id));
+    setSelectedIds(allSelected ? new Set() : new Set(rows.map((r) => r.transaction_id)));
+    setBulkDecision(null);
+  };
+
+  const handleBulkResolve = async () => {
+    if (!bulkDecision || selectedIds.size === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const result = await bulkResolveTransactions([...selectedIds], bulkDecision);
+      const failedCount = result.failed.length;
+      showToast(
+        bulkDecision === "APPROVED" ? "success" : "danger",
+        `${result.succeeded.length} transaction${result.succeeded.length === 1 ? "" : "s"} ${bulkDecision === "APPROVED" ? "approved" : "blocked"}`,
+        failedCount > 0
+          ? `${failedCount} skipped (already resolved or not found).`
+          : "Each decision carries your stamp in Completed."
+      );
+      setSelectedIds(new Set());
+      setBulkDecision(null);
+      await refresh();
+    } catch (e: any) {
+      console.error("Bulk resolve failed:", e);
+      const detail = e?.response?.data?.detail;
+      showToast("danger", "Bulk action failed", typeof detail === "string" ? detail : "Could not update the selected transactions.");
+    } finally {
+      setBulkBusy(false);
+    }
+  };
 
   const handleResolve = async (txnId: string, decision: "APPROVED" | "BLOCKED") => {
     setResolvingId(txnId);
@@ -188,6 +269,26 @@ export const ReviewQueue: React.FC = () => {
       month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"
     }) : null;
 
+  const fmtMins = (mins: number) => {
+    const m = Math.max(0, Math.round(mins));
+    if (m < 60) return `${m}m`;
+    return `${Math.floor(m / 60)}h ${m % 60}m`;
+  };
+
+  // SLA ageing for a pending row: measured from when the analyst flagged it
+  // (claimed_at), falling back to creation. <30m fresh, 30-120m due, >2h breach.
+  const getAging = (row: Transaction): { mins: number; label: string; cls: string } => {
+    const start = row.claimed_at || row.created_at;
+    let mins = 0;
+    try {
+      const d = start ? parseApiTimestamp(start) : new Date();
+      mins = Math.max(0, (Date.now() - d.getTime()) / 60000);
+    } catch { /* treat as fresh */ }
+    if (mins >= 120) return { mins, label: `${fmtMins(mins)} waiting`, cls: "text-brand-danger bg-brand-danger/10 border-brand-danger/30" };
+    if (mins >= 30) return { mins, label: `${fmtMins(mins)} waiting`, cls: "text-brand-warning bg-brand-warning/10 border-brand-warning/30" };
+    return { mins, label: "Fresh", cls: "text-brand-success bg-brand-success/10 border-brand-success/30" };
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -207,6 +308,11 @@ export const ReviewQueue: React.FC = () => {
               {pendingTotal}
             </h3>
             <p className="text-xs text-dark-muted mt-1">Flagged by analysts, awaiting your decision</p>
+            {metrics && metrics.oldest_pending_minutes > 0 && (
+              <p className={`text-xs font-bold mt-1 ${metrics.oldest_pending_minutes >= 120 ? "text-brand-danger" : "text-dark-muted"}`}>
+                Oldest waiting: {fmtMins(metrics.oldest_pending_minutes)}
+              </p>
+            )}
           </div>
           <div className="h-12 w-12 rounded-lg bg-guard-orangeLight border border-guard-orange/30 flex items-center justify-center">
             <Inbox className={`h-6 w-6 text-guard-orange ${counterBump ? "animate-ping" : ""}`} />
@@ -224,6 +330,25 @@ export const ReviewQueue: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Throughput metrics: does the pipeline keep up with inflow? */}
+      {metrics && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {[
+            { label: "Oldest waiting", value: fmtMins(metrics.oldest_pending_minutes), danger: metrics.oldest_pending_minutes >= 120 },
+            { label: "Resolved (24h)", value: metrics.resolved_24h.toLocaleString(), danger: false },
+            { label: "Median decision time", value: fmtMins(metrics.median_resolve_minutes), danger: metrics.median_resolve_minutes >= 120 },
+            { label: "Auto-approved by policy (24h)", value: metrics.auto_resolved_24h.toLocaleString(), danger: false },
+          ].map((tile) => (
+            <div key={tile.label} className="bg-dark-card border border-dark-border rounded-xl px-4 py-3">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-dark-muted block">{tile.label}</span>
+              <span className={`text-lg font-extrabold block mt-0.5 ${tile.danger ? "text-brand-danger" : "text-dark-text"}`}>
+                {tile.value}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Tabs + live indicator */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
@@ -270,6 +395,18 @@ export const ReviewQueue: React.FC = () => {
             className="w-full bg-dark-card border border-dark-border text-dark-text text-sm rounded-lg pl-9 pr-3 py-2 focus:border-guard-orange focus:outline-none placeholder:text-dark-muted"
           />
         </div>
+        <label className="flex items-center gap-1.5 text-xs text-dark-muted font-semibold shrink-0">
+          Order
+          <select
+            value={sortMode}
+            onChange={(e) => { setSortMode(e.target.value as "desc" | "asc" | "risk"); setPage(0); }}
+            className="bg-dark-card border border-dark-border text-dark-text text-xs rounded-lg px-2 py-2 focus:border-guard-orange focus:outline-none"
+          >
+            <option value="desc">Newest first</option>
+            <option value="asc">Oldest first</option>
+            <option value="risk">Risk: highest first</option>
+          </select>
+        </label>
         <button
           type="submit"
           className="inline-flex items-center justify-center gap-1.5 text-xs font-bold px-4 py-2 rounded-lg bg-guard-orange text-white border border-guard-orange hover:bg-guard-orange/90 transition"
@@ -288,6 +425,64 @@ export const ReviewQueue: React.FC = () => {
         )}
       </form>
 
+      {/* Bulk resolve toolbar - Pending tab only, appears on selection */}
+      {tab === "pending" && selectedIds.size > 0 && (
+        <div className="bg-dark-card border border-guard-orange/40 rounded-xl px-4 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <span className="text-xs font-bold text-guard-orange">
+            {selectedIds.size} transaction{selectedIds.size === 1 ? "" : "s"} selected
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {bulkDecision ? (
+              <>
+                <span className="text-xs font-semibold text-dark-text">
+                  {bulkDecision === "APPROVED" ? "Approve" : "Block"} all {selectedIds.size} with your stamp?
+                </span>
+                <button
+                  onClick={handleBulkResolve}
+                  disabled={bulkBusy}
+                  className={`inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg text-white transition disabled:opacity-50 ${
+                    bulkDecision === "APPROVED" ? "bg-brand-success hover:bg-brand-success/90" : "bg-brand-danger hover:bg-brand-danger/90"
+                  }`}
+                >
+                  {bulkBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : bulkDecision === "APPROVED" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Ban className="h-3.5 w-3.5" />}
+                  Confirm
+                </button>
+                <button
+                  onClick={() => setBulkDecision(null)}
+                  disabled={bulkBusy}
+                  className="text-xs font-bold px-3 py-1.5 rounded-lg bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => setBulkDecision("APPROVED")}
+                  disabled={bulkBusy}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-brand-success text-white hover:bg-brand-success/90 transition disabled:opacity-50"
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" /> Approve selected ({selectedIds.size})
+                </button>
+                <button
+                  onClick={() => setBulkDecision("BLOCKED")}
+                  disabled={bulkBusy}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-brand-danger text-white hover:bg-brand-danger/90 transition disabled:opacity-50"
+                >
+                  <Ban className="h-3.5 w-3.5" /> Block selected ({selectedIds.size})
+                </button>
+                <button
+                  onClick={() => setSelectedIds(new Set())}
+                  className="text-xs font-bold px-3 py-1.5 rounded-lg bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition"
+                >
+                  Clear
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       <div className="bg-dark-card border border-dark-border rounded-xl shadow-glow-brand overflow-hidden">
         <div className="overflow-x-auto">
@@ -296,10 +491,19 @@ export const ReviewQueue: React.FC = () => {
               <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider">
                 {tab === "pending" ? (
                   <tr>
+                    <th className="px-3 py-3 w-8">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all rows on this page"
+                        checked={rows.length > 0 && rows.every((r) => selectedIds.has(r.transaction_id))}
+                        onChange={toggleSelectAll}
+                        className="accent-guard-orange align-middle"
+                      />
+                    </th>
                     <th className="px-3 py-3">Received</th>
                     <th className="px-3 py-3">Transaction ID</th>
                     <th className="px-3 py-3">User Account</th>
-                    <th className="px-3 py-3">Amount</th>
+                    <th className="px-3 py-3 text-right">Amount</th>
                     <th className="px-3 py-3 text-center">Risk</th>
                     <th className="px-3 py-3">Flagged By (Analyst)</th>
                     <th className="px-3 py-3 text-right">Your Decision</th>
@@ -318,7 +522,7 @@ export const ReviewQueue: React.FC = () => {
               <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
                 {fetching && rows.length === 0 && (
                   <tr>
-                    <td colSpan={tab === "pending" ? 7 : 6} className="px-3 py-12 text-center">
+                    <td colSpan={tab === "pending" ? 8 : 6} className="px-3 py-12 text-center">
                       <Loader2 className="h-6 w-6 animate-spin text-guard-orange mx-auto" />
                       <p className="text-xs text-dark-muted mt-2">Loading review queue…</p>
                     </td>
@@ -326,22 +530,41 @@ export const ReviewQueue: React.FC = () => {
                 )}
 
                 {/* PENDING ROWS */}
-                {tab === "pending" && rows.map((row) => (
+                {tab === "pending" && rows.map((row) => {
+                  const aging = getAging(row);
+                  return (
                   <tr
                     key={row.transaction_id}
                     onClick={() => openDetail(row)}
                     className="hover:bg-dark-border/10 transition cursor-pointer"
                   >
+                    <td className="px-3 py-3.5" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${row.transaction_id}`}
+                        checked={selectedIds.has(row.transaction_id)}
+                        onChange={() => toggleSelect(row.transaction_id)}
+                        className="accent-guard-orange align-middle"
+                      />
+                    </td>
                     <td className="px-3 py-3.5 text-xs text-dark-muted font-semibold whitespace-nowrap">
                       <span className="flex items-center gap-1.5">
                         <Clock className="h-3.5 w-3.5" />
                         {fmtTime(row.claimed_at) || fmtTime(row.created_at)}
                       </span>
+                      <span className={`inline-block mt-1 text-[10px] font-bold px-1.5 py-0.5 rounded border ${aging.cls}`}>
+                        {aging.label}
+                      </span>
                     </td>
                     <td className="px-3 py-3.5 font-mono text-xs font-semibold text-dark-text">{row.transaction_id}</td>
                     <td className="px-3 py-3.5 text-dark-text font-medium">{row.user_id}</td>
                     <td className="px-3 py-3.5 text-dark-text font-bold">₦{row.amount.toLocaleString("en-NG")}</td>
-                    <td className="px-3 py-3.5 text-center">{getRiskBadge(row.risk_level)}</td>
+                    <td className="px-3 py-3.5 text-center">
+                      {getRiskBadge(row.risk_level)}
+                      {row.risk_score !== null && (
+                        <span className="block text-[10px] font-semibold text-dark-muted">({row.risk_score}%)</span>
+                      )}
+                    </td>
                     <td className="px-3 py-3.5">
                       <span className="text-dark-text font-semibold text-xs block">{row.claimed_by || "—"}</span>
                       {row.claimed_at && (
@@ -371,7 +594,8 @@ export const ReviewQueue: React.FC = () => {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
 
                 {/* COMPLETED ROWS */}
                 {tab === "completed" && rows.map((row) => (
@@ -406,7 +630,12 @@ export const ReviewQueue: React.FC = () => {
                     </td>
                     <td className="px-3 py-3.5">
                       <span className="text-guard-orange font-semibold text-xs block">{row.resolved_by || "—"}</span>
-                      {row.resolved_at && <span className="text-[10px] text-dark-muted">{fmtTime(row.resolved_at)}</span>}
+                      {row.resolved_by === "system:policy" && (
+                        <span className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded border border-brand-info/40 bg-brand-info/10 text-brand-info">
+                          AUTO
+                        </span>
+                      )}
+                      {row.resolved_at && <span className="text-[10px] text-dark-muted block">{fmtTime(row.resolved_at)}</span>}
                     </td>
                   </tr>
                 ))}
@@ -520,8 +749,21 @@ export const ReviewQueue: React.FC = () => {
                     </span>
                   )}
                   {getRiskBadge(selectedTxn.risk_level)}
+                  {selectedTxn.risk_score !== null && (
+                    <span className="text-xs font-bold text-dark-muted">{selectedTxn.risk_score}%</span>
+                  )}
                 </div>
               </div>
+
+              {/* Decision support: base rate for this risk level */}
+              {outcomes && (outcomes.approved + outcomes.blocked + outcomes.auto_resolved) > 0 && (
+                <div className="bg-gray-50/50 dark:bg-white/5 border border-dark-border rounded-lg px-3 py-2 text-xs text-dark-muted">
+                  Last {outcomes.days} days for <span className="font-bold text-dark-text">{outcomes.risk_level}</span> risk:{" "}
+                  <span className="font-bold text-brand-success">{outcomes.approved} approved</span> ·{" "}
+                  <span className="font-bold text-brand-danger">{outcomes.blocked} blocked</span> ·{" "}
+                  <span className="font-bold text-brand-info">{outcomes.auto_resolved} auto-approved by policy</span>
+                </div>
+              )}
 
               {/* Resolve panel for live (PENDING/SUSPENDED) work */}
               {(selectedTxn.status === "SUSPENDED" || selectedTxn.status === "PENDING") && (
@@ -539,6 +781,7 @@ export const ReviewQueue: React.FC = () => {
                     >
                       {resolvingId === selectedTxn.transaction_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
                       Approve Transaction
+                      <kbd className="ml-1 text-[9px] font-mono bg-white/20 border border-white/30 rounded px-1">A</kbd>
                     </button>
                     <button
                       disabled={resolvingId === selectedTxn.transaction_id}
@@ -547,6 +790,7 @@ export const ReviewQueue: React.FC = () => {
                     >
                       {resolvingId === selectedTxn.transaction_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Ban className="h-3.5 w-3.5" />}
                       Block Transaction
+                      <kbd className="ml-1 text-[9px] font-mono bg-white/20 border border-white/30 rounded px-1">B</kbd>
                     </button>
                   </div>
                 </div>

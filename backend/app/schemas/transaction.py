@@ -32,3 +32,20 @@ class TransactionResponse(TransactionBase):
 
 class ResolveTransactionRequest(BaseModel):
     decision: str = Field(..., description="APPROVED or BLOCKED")
+
+
+class BulkSuspendRequest(BaseModel):
+    """Analyst batch-flag: same semantics as single suspend, per row."""
+    transaction_ids: list[str] = Field(
+        ..., min_length=1, max_length=100,
+        description="1-100 PENDING transaction IDs to flag"
+    )
+
+
+class BulkResolveRequest(BaseModel):
+    """Admin batch decision: APPROVED or BLOCKED for every id listed."""
+    transaction_ids: list[str] = Field(
+        ..., min_length=1, max_length=100,
+        description="1-100 PENDING/SUSPENDED transaction IDs to resolve"
+    )
+    decision: str = Field(..., description="APPROVED or BLOCKED")

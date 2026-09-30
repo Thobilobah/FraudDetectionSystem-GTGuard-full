@@ -147,6 +147,78 @@ export const getTransactionById = async (transactionId: string): Promise<Transac
   return response.data;
 };
 
+export interface BulkResult {
+  succeeded: string[];
+  failed: { transaction_id: string; reason: string }[];
+}
+
+/** Analyst batch-flag: same semantics as suspendTransaction, per row. */
+export const bulkSuspendTransactions = async (transactionIds: string[]): Promise<BulkResult> => {
+  const response = await api.post("/transactions/bulk-suspend", {
+    transaction_ids: transactionIds,
+  });
+  return response.data;
+};
+
+/** Admin batch decision over up to 100 PENDING/SUSPENDED rows. */
+export const bulkResolveTransactions = async (
+  transactionIds: string[],
+  decision: "APPROVED" | "BLOCKED"
+): Promise<BulkResult> => {
+  const response = await api.post("/transactions/bulk-resolve", {
+    transaction_ids: transactionIds,
+    decision,
+  });
+  return response.data;
+};
+
+export interface QueueMetrics {
+  pending: number;
+  oldest_pending_minutes: number;
+  completed_total: number;
+  resolved_total: number;
+  resolved_24h: number;
+  auto_resolved_24h: number;
+  median_resolve_minutes: number;
+}
+
+/** Admin backlog/throughput stats (badge, dashboard card, metrics strip). */
+export const getQueueMetrics = async (): Promise<QueueMetrics> => {
+  const response = await api.get("/transactions/queue-metrics");
+  return response.data;
+};
+
+/**
+ * Trigger the conservative auto-resolve policy sweep. The server throttles
+ * itself to one real sweep per minute, so polling this is cheap.
+ */
+export const runAutoResolve = async (): Promise<{ skipped?: boolean; resolved?: number }> => {
+  const response = await api.post("/transactions/auto-resolve-run");
+  return response.data;
+};
+
+export interface RecentOutcomes {
+  risk_level: string;
+  days: number;
+  total: number;
+  approved: number;
+  blocked: number;
+  auto_resolved: number;
+  analyst_flagged: number;
+  still_pending: number;
+}
+
+/** Decision support: how similar-risk transactions resolved recently. */
+export const getRecentOutcomes = async (
+  riskLevel: string,
+  days = 7
+): Promise<RecentOutcomes> => {
+  const response = await api.get("/transactions/outcomes", {
+    params: { risk_level: riskLevel, days },
+  });
+  return response.data;
+};
+
 /**
  * Admin-only: downloads a CSV report for the given date range and triggers
  * a browser save-as, so an admin can see who claimed/resolved every

@@ -716,16 +716,22 @@ class TransactionRepository:
     def get_transactions_page(self, limit: int = 50, offset: int = 0,
                               search: str = "", risk_level: str = "", status: str = "",
                               sort: str = "desc", flagged_by: str = "") -> list:
-        """Paginated, filtered transaction listing for the ledger. ORDER BY
-        rides idx_txn_created; filters are bound params. `sort` is whitelisted
-        (desc|asc) so it can never inject SQL."""
-        order = "ASC" if sort == "asc" else "DESC"
+        """Paginated, filtered transaction listing for the ledger. Filters are
+        bound params. `sort` is whitelisted (desc|asc|risk) so it can never
+        inject SQL: desc = newest first, asc = oldest first (ageing view),
+        risk = highest risk_score first (triage view)."""
+        if sort == "risk":
+            order_sql = "ORDER BY risk_score DESC NULLS LAST, created_at DESC"
+        elif sort == "asc":
+            order_sql = "ORDER BY created_at ASC"
+        else:
+            order_sql = "ORDER BY created_at DESC"
         where_sql, params = self._build_filters(search, risk_level, status, flagged_by)
         with self.get_connection() as conn:
             cursor = conn.execute(f"""
                 SELECT * FROM transactions
                 {where_sql}
-                ORDER BY created_at {order}
+                {order_sql}
                 LIMIT {limit} OFFSET {offset}
             """, tuple(params))
             return [dict(row) for row in cursor.fetchall()]
@@ -736,6 +742,151 @@ class TransactionRepository:
         with self.get_connection() as conn:
             cursor = conn.execute(f"SELECT COUNT(*) AS total FROM transactions {where_sql}", tuple(params))
             return cursor.fetchone()["total"]
+
+    def queue_metrics(self) -> dict:
+        """Backlog/throughput stats for the admin Review Queue strip and the
+        dashboard badge. One round-trip: pending depth + age, review counts,
+        and median minutes from creation to decision over the last 24h
+        (created_at/resolved_at are naive-ISO TEXT, cast in SQL)."""
+        cutoff_24h = (datetime.now() - timedelta(hours=24)).isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT COUNT(*) AS pending, MIN(created_at) AS oldest
+                FROM transactions WHERE status = 'SUSPENDED'
+            """)
+            pend = cursor.fetchone()
+            cursor = conn.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status IN ('APPROVED', 'BLOCKED')) AS completed_total,
+                    COUNT(*) FILTER (WHERE resolved_at IS NOT NULL) AS resolved_total,
+                    COUNT(*) FILTER (WHERE resolved_at >= ?) AS resolved_24h,
+                    COUNT(*) FILTER (WHERE resolved_by = 'system:policy' AND resolved_at >= ?) AS auto_24h
+                FROM transactions
+            """, (cutoff_24h, cutoff_24h))
+            agg = cursor.fetchone()
+            cursor = conn.execute("""
+                SELECT COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (
+                    ORDER BY EXTRACT(EPOCH FROM (resolved_at::timestamp - created_at::timestamp)) / 60.0
+                ), 0) AS median_min
+                FROM transactions
+                WHERE resolved_at IS NOT NULL AND resolved_at >= ?
+            """, (cutoff_24h,))
+            median_min = cursor.fetchone()["median_min"]
+
+        oldest_minutes = 0.0
+        oldest = pend["oldest"]
+        if oldest:
+            try:
+                ts = oldest if isinstance(oldest, datetime) else datetime.fromisoformat(str(oldest))
+                oldest_minutes = max(0.0, (datetime.now() - ts).total_seconds() / 60.0)
+            except ValueError:
+                pass
+        return {
+            "pending": int(pend["pending"] or 0),
+            "oldest_pending_minutes": round(oldest_minutes, 1),
+            "completed_total": int(agg["completed_total"] or 0),
+            "resolved_total": int(agg["resolved_total"] or 0),
+            "resolved_24h": int(agg["resolved_24h"] or 0),
+            "auto_resolved_24h": int(agg["auto_24h"] or 0),
+            "median_resolve_minutes": round(float(median_min or 0), 1),
+        }
+
+    def recent_outcomes(self, risk_level: str = "MEDIUM", days: int = 7) -> dict:
+        """Decision-support stats for the detail modal: how similar-risk
+        transactions resolved recently, so an admin can see the base rate
+        before approving or blocking the one in front of them."""
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE status = 'APPROVED') AS approved,
+                    COUNT(*) FILTER (WHERE status = 'BLOCKED') AS blocked,
+                    COUNT(*) FILTER (WHERE resolved_by = 'system:policy') AS auto_resolved,
+                    COUNT(*) FILTER (WHERE claimed_by IS NOT NULL) AS analyst_flagged,
+                    COUNT(*) FILTER (WHERE status = 'SUSPENDED') AS still_pending
+                FROM transactions
+                WHERE risk_level = ? AND created_at >= ?
+            """, (risk_level, cutoff))
+            row = cursor.fetchone()
+        return {
+            "risk_level": risk_level,
+            "days": days,
+            "total": int(row["total"] or 0),
+            "approved": int(row["approved"] or 0),
+            "blocked": int(row["blocked"] or 0),
+            "auto_resolved": int(row["auto_resolved"] or 0),
+            "analyst_flagged": int(row["analyst_flagged"] or 0),
+            "still_pending": int(row["still_pending"] or 0),
+        }
+
+    def run_auto_resolve_policy(self) -> dict:
+        """Conservative policy sweep for unclaimed backlog. Eligible rows are
+        unclaimed PENDING transactions in the very bottom of the MEDIUM band
+        (risk_level='MEDIUM' and risk_score <= AUTO_RESOLVE_MAX_SCORE) that
+        have been untouched for AUTO_RESOLVE_AFTER_MIN minutes. Any CRITICAL
+        rule hit disqualifies the row. The final UPDATE re-asserts
+        status='PENDING', so a transaction an analyst suspends between our
+        SELECT and UPDATE is never auto-resolved - SUSPENDED work stays
+        strictly human. Decisions are stamped resolved_by='system:policy'."""
+        if not settings.AUTO_RESOLVE_ENABLED:
+            return {"enabled": False, "candidates": 0, "resolved": 0, "ids": []}
+
+        cutoff = (
+            datetime.now() - timedelta(minutes=settings.AUTO_RESOLVE_AFTER_MIN)
+        ).isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT transaction_id, triggered_rules
+                FROM transactions
+                WHERE status = 'PENDING'
+                  AND risk_level = 'MEDIUM'
+                  AND risk_score IS NOT NULL
+                  AND risk_score <= ?
+                  AND created_at <= ?
+                ORDER BY created_at ASC
+                LIMIT ?
+            """, (
+                settings.AUTO_RESOLVE_MAX_SCORE,
+                cutoff,
+                settings.AUTO_RESOLVE_BATCH,
+            ))
+            candidates = [dict(r) for r in cursor.fetchall()]
+
+            eligible_ids = []
+            for cand in candidates:
+                rules = cand.get("triggered_rules") or []
+                if isinstance(rules, str):
+                    try:
+                        rules = json.loads(rules)
+                    except (ValueError, TypeError):
+                        rules = []
+                has_critical = any(
+                    isinstance(r, dict) and r.get("severity") == "CRITICAL" for r in rules
+                )
+                if not has_critical:
+                    eligible_ids.append(cand["transaction_id"])
+
+            if not eligible_ids:
+                return {"enabled": True, "candidates": len(candidates), "resolved": 0, "ids": []}
+
+            # Race-safe: re-assert PENDING so rows claimed meanwhile are skipped.
+            cursor = conn.execute("""
+                UPDATE transactions
+                SET status = 'APPROVED', resolved_by = 'system:policy',
+                    resolved_at = ?, is_fraud = 0
+                WHERE transaction_id = ANY(?) AND status = 'PENDING'
+                RETURNING transaction_id
+            """, (datetime.now().isoformat(), eligible_ids))
+            resolved_ids = [r["transaction_id"] for r in cursor.fetchall()]
+            conn.commit()
+
+        return {
+            "enabled": True,
+            "candidates": len(candidates),
+            "resolved": len(resolved_ids),
+            "ids": resolved_ids,
+        }
 
     def purge_internal_transactions(self) -> int:
         """Delete the demo-support rows older scenario generators persisted

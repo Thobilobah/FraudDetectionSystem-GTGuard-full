@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import type { Transaction } from "../types";
-import { resolveTransaction, suspendTransaction, getStoredUser, getTransactionsPage } from "../services/api";
+import { resolveTransaction, suspendTransaction, bulkSuspendTransactions, getStoredUser, getTransactionsPage } from "../services/api";
 import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
@@ -35,6 +35,10 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   const firstLoadDone = useRef(false);
   const currentUser = getStoredUser();
   const isAdmin = currentUser?.role === "admin";
+  // Analyst bulk-suspend: multi-select PENDING rows, then one batch call.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkConfirm, setBulkConfirm] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   // Re-fetch the active page without flipping the loading flag, so periodic
   // refreshes don't dim the table. Errors keep the previous rows on screen.
@@ -89,6 +93,62 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   const applySearch = () => {
     setAppliedSearch(searchTerm.trim());
     setPage(0);
+  };
+
+  // Drop selections for rows that left PENDING (resolved, suspended by a
+  // colleague, or rolled to the next page) so the toolbar count is always true.
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const pendingNow = new Set(
+        rows.filter((r) => r.status === "PENDING").map((r) => r.transaction_id)
+      );
+      const next = new Set([...prev].filter((id) => pendingNow.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [rows]);
+
+  const toggleSelect = (txnId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(txnId)) next.delete(txnId);
+      else next.add(txnId);
+      return next;
+    });
+    setBulkConfirm(false);
+  };
+
+  const toggleSelectAllPending = () => {
+    const pendingOnPage = rows.filter((r) => r.status === "PENDING").map((r) => r.transaction_id);
+    const allSelected = pendingOnPage.length > 0 && pendingOnPage.every((id) => selectedIds.has(id));
+    setSelectedIds(allSelected ? new Set() : new Set(pendingOnPage));
+    setBulkConfirm(false);
+  };
+
+  const handleBulkSuspend = async () => {
+    if (selectedIds.size === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const result = await bulkSuspendTransactions([...selectedIds]);
+      const failedCount = result.failed.length;
+      showToast(
+        "suspended",
+        `${result.succeeded.length} transaction${result.succeeded.length === 1 ? "" : "s"} suspended`,
+        failedCount > 0
+          ? `${failedCount} skipped (already actioned or not found).`
+          : "Flagged under your name, pending admin review."
+      );
+      setSelectedIds(new Set());
+      setBulkConfirm(false);
+      await reloadCurrentPage();
+      void onRefresh();
+    } catch (e: any) {
+      console.error("Bulk suspend failed:", e);
+      const detail = e?.response?.data?.detail;
+      showToast("danger", "Bulk suspend failed", typeof detail === "string" ? detail : "Could not suspend the selected transactions.");
+    } finally {
+      setBulkBusy(false);
+    }
   };
 
   const handleRefresh = async () => {
@@ -340,12 +400,75 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
               )}
             </form>
           </div>
-          
+
+          {/* Analyst bulk-suspend toolbar (appears once rows are selected) */}
+          {!isAdmin && selectedIds.size > 0 && (
+            <div className="px-4 py-2.5 border-b border-dark-border bg-guard-orangeLight/40 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-bold text-guard-orange">
+                {selectedIds.size} PENDING transaction{selectedIds.size === 1 ? "" : "s"} selected
+              </span>
+              <div className="flex items-center gap-2">
+                {bulkConfirm ? (
+                  <>
+                    <span className="text-xs font-semibold text-dark-text">
+                      Flag all {selectedIds.size} under your name?
+                    </span>
+                    <button
+                      onClick={handleBulkSuspend}
+                      disabled={bulkBusy}
+                      className="inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-md bg-guard-orange text-white hover:bg-guard-orange/90 transition disabled:opacity-50"
+                    >
+                      {bulkBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PauseCircle className="h-3.5 w-3.5" />}
+                      {bulkBusy ? "Suspending..." : "Confirm"}
+                    </button>
+                    <button
+                      onClick={() => setBulkConfirm(false)}
+                      disabled={bulkBusy}
+                      className="text-xs font-bold px-3 py-1.5 rounded-md bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition"
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => setBulkConfirm(true)}
+                      disabled={bulkBusy}
+                      className="inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-md bg-guard-orange text-white hover:bg-guard-orange/90 transition disabled:opacity-50"
+                    >
+                      <PauseCircle className="h-3.5 w-3.5" /> Suspend selected ({selectedIds.size})
+                    </button>
+                    <button
+                      onClick={() => setSelectedIds(new Set())}
+                      className="text-xs font-bold px-3 py-1.5 rounded-md bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition"
+                    >
+                      Clear
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
             {rows.length > 0 || isLoading ? (
               <table className="w-full text-left border-collapse">
                 <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider sticky top-0">
                   <tr>
+                    {!isAdmin && (
+                      <th className="px-3 py-3 w-8">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all pending rows on this page"
+                          checked={
+                            rows.filter((r) => r.status === "PENDING").length > 0 &&
+                            rows.filter((r) => r.status === "PENDING").every((r) => selectedIds.has(r.transaction_id))
+                          }
+                          onChange={toggleSelectAllPending}
+                          className="accent-guard-orange align-middle"
+                        />
+                      </th>
+                    )}
                     <th className="px-3 py-3">Txn ID</th>
                     <th className="px-3 py-3">User</th>
                     <th className="px-3 py-3">Amount</th>
@@ -358,7 +481,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                 <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
                   {isLoading && rows.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="px-3 py-12 text-center">
+                      <td colSpan={isAdmin ? 7 : 8} className="px-3 py-12 text-center">
                         <Loader2 className="h-6 w-6 animate-spin text-guard-orange mx-auto" />
                         <p className="text-xs text-dark-muted mt-2">Loading stream…</p>
                       </td>
@@ -374,6 +497,19 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                         selectedTxn?.transaction_id === txn.transaction_id ? "bg-guard-orangeLight/40 border-l-4 border-l-guard-orange" : ""
                       } ${txn.status === "SUSPENDED" ? "bg-guard-orangeLight/60" : ""} ${txn.status === "PENDING" ? "bg-brand-info/5" : ""}`}
                     >
+                      {!isAdmin && (
+                        <td className="px-3 py-3.5" onClick={(e) => e.stopPropagation()}>
+                          {txn.status === "PENDING" ? (
+                            <input
+                              type="checkbox"
+                              aria-label={`Select ${txn.transaction_id}`}
+                              checked={selectedIds.has(txn.transaction_id)}
+                              onChange={() => toggleSelect(txn.transaction_id)}
+                              className="accent-guard-orange align-middle"
+                            />
+                          ) : null}
+                        </td>
+                      )}
                       <td className="px-3 py-3.5 font-mono text-xs font-semibold text-dark-text">
                         {txn.transaction_id}
                       </td>
