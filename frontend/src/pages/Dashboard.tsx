@@ -44,8 +44,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
   // every analyst sees ONLY the transactions they personally suspended
   // (each analyst's section is unique to them), newest first.
   const analystEmail = !isAdmin ? (getStoredUser()?.email ?? "") : "";
+  const myFlagsPageSize = 10;
   const [myFlags, setMyFlags] = useState<Transaction[]>([]);
   const [myFlagsTotal, setMyFlagsTotal] = useState(0);
+  const [myFlagsPage, setMyFlagsPage] = useState(0);
   const [myFlagsLoading, setMyFlagsLoading] = useState(true);
 
   useEffect(() => {
@@ -55,12 +57,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
       try {
         const page = await getTransactionsPage({
           flagged_by: analystEmail,
-          limit: 10,
+          limit: myFlagsPageSize,
+          offset: myFlagsPage * myFlagsPageSize,
           sort: "desc",
         });
         if (!alive) return;
         setMyFlags(page.items);
         setMyFlagsTotal(page.total);
+        // Snap back if this page emptied (last row resolved elsewhere, or a
+        // shrinking list left this offset beyond the end).
+        if (page.items.length === 0 && page.total > 0 && myFlagsPage > 0) {
+          setMyFlagsPage(Math.max(0, Math.ceil(page.total / myFlagsPageSize) - 1));
+        }
       } catch (e) {
         console.error("My flagged transactions failed:", e);
       } finally {
@@ -70,7 +78,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
     loadFlags();
     const id = window.setInterval(loadFlags, 10000);
     return () => { alive = false; window.clearInterval(id); };
-  }, [analystEmail]);
+  }, [analystEmail, myFlagsPage]);
+
+  const myFlagsTotalPages = Math.max(1, Math.ceil(myFlagsTotal / myFlagsPageSize));
 
   const fmtWhen = (iso: string | null | undefined) =>
     iso ? parseApiTimestamp(iso).toLocaleString("en-NG", {
@@ -196,7 +206,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <p className="text-xs text-dark-muted mt-2">Loading your flagged transactions…</p>
             </div>
           ) : myFlags.length > 0 ? (
-            <div className="overflow-x-auto">
+            <div>
+              <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider">
                   <tr>
@@ -242,6 +253,28 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   ))}
                 </tbody>
               </table>
+              </div>
+              {myFlagsTotalPages > 1 && (
+                <div className="flex items-center justify-between gap-3 mt-4 pt-3 border-t border-dark-border">
+                  <button
+                    onClick={() => setMyFlagsPage((p) => Math.max(0, p - 1))}
+                    disabled={myFlagsPage === 0}
+                    className="text-xs font-bold px-3 py-1.5 rounded-lg bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <span className="text-xs text-dark-muted font-semibold">
+                    Page {myFlagsPage + 1} of {myFlagsTotalPages}
+                  </span>
+                  <button
+                    onClick={() => setMyFlagsPage((p) => Math.min(myFlagsTotalPages - 1, p + 1))}
+                    disabled={myFlagsPage >= myFlagsTotalPages - 1}
+                    className="text-xs font-bold px-3 py-1.5 rounded-lg bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div className="py-8 text-center text-xs text-dark-muted">

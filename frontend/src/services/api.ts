@@ -95,7 +95,7 @@ export interface TransactionPageParams {
   search?: string;
   risk_level?: string;
   status?: string;
-  sort?: "desc" | "asc";
+  sort?: "desc" | "asc" | "risk";
   flagged_by?: string;
 }
 
