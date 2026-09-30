@@ -23,14 +23,26 @@ api.interceptors.request.use((config) => {
 });
 
 // If the backend rejects the token (expired / missing), drop the session
-// and let App.tsx fall back to the login screen.
+// and let App.tsx fall back to the login screen - but ONLY when the failed
+// request actually carried the current session's own token. The background
+// simulation stream may still be sending an older token it captured when it
+// started; a 401 from that stale token must not kick a freshly signed-in
+// user back to the login screen.
 api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error?.response?.status === 401) {
-      localStorage.removeItem(TOKEN_KEY);
-      localStorage.removeItem(USER_KEY);
-      window.dispatchEvent(new Event("fraudguard:logout"));
+      const headers = error?.config?.headers;
+      const usedAuth =
+        typeof headers?.get === "function"
+          ? headers.get("Authorization")
+          : headers?.Authorization;
+      const sessionToken = localStorage.getItem(TOKEN_KEY);
+      if (!sessionToken || !usedAuth || usedAuth === `Bearer ${sessionToken}`) {
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(USER_KEY);
+        window.dispatchEvent(new Event("fraudguard:logout"));
+      }
     }
     return Promise.reject(error);
   }
@@ -55,6 +67,12 @@ export const logout = () => {
 };
 
 export const isAuthenticated = (): boolean => !!localStorage.getItem(TOKEN_KEY);
+
+// Used by the background simulation stream: it captures the token once when
+// it starts and sends it explicitly, so it can keep generating transactions
+// after the user logs out (the request interceptor still prefers the live
+// session token whenever the user is signed in).
+export const getSessionToken = (): string | null => localStorage.getItem(TOKEN_KEY);
 
 export const getStoredUser = (): AuthUser | null => {
   const raw = localStorage.getItem(USER_KEY);
@@ -109,13 +127,20 @@ export const predictTransaction = async (transaction: Omit<Transaction, "transac
   return response.data;
 };
 
-export const predictFeatures = async (features: Record<string, any>) => {
-  const response = await api.post("/predict/features", features);
+export const predictFeatures = async (features: Record<string, any>, authToken?: string | null) => {
+  const response = await api.post("/predict/features", features, {
+    headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+  });
   return response.data;
 };
 
-export const generateDemoTransaction = async (scenario: "normal" | "suspicious" | "high_risk") => {
-  const response = await api.post(`/demo/generate?scenario=${scenario}`);
+export const generateDemoTransaction = async (
+  scenario: "normal" | "suspicious" | "high_risk",
+  authToken?: string | null
+) => {
+  const response = await api.post(`/demo/generate?scenario=${scenario}`, null, {
+    headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+  });
   return response.data;
 };
 
