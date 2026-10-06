@@ -68,6 +68,18 @@ def purge_internal_transactions(current_user: dict = Depends(require_admin)):
         raise HTTPException(status_code=500, detail=f"Failed to purge internal rows: {str(e)}")
     return {"deleted": deleted}
 
+@router.post("/transactions/migrate-nigerian-coordinates")
+def migrate_nigerian_coordinates(current_user: dict = Depends(require_admin)):
+    """Admin-only data repair: rewrite every transaction/profile coordinate
+    outside Nigeria onto a Nigerian city (the legacy seed used Indian
+    profile coordinates). Idempotent - rows already inside Nigeria are
+    untouched, so a repeat run reports zero updates."""
+    try:
+        result = db_repo.migrate_nigerian_coordinates()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Coordinate migration failed: {str(e)}")
+    return {"status": "ok", **result}
+
 @router.get("/transactions/export")
 def export_transactions_csv(
     start_date: str = Query(..., description="ISO date, e.g. 2026-09-01"),

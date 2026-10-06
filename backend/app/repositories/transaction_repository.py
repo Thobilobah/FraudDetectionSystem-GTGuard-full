@@ -22,6 +22,9 @@ import psycopg2
 import psycopg2.extras
 from psycopg2 import pool as pg_pool
 from backend.app.config import settings
+from backend.app.services.nigeria_places import (
+    NIGERIAN_PLACES as NG_PLACES, is_in_nigeria, jittered_place,
+)
 
 _PLACEHOLDER_RE = re.compile(r"\?")
 
@@ -337,8 +340,10 @@ class TransactionRepository:
                         float(row["user_transaction_std"]),
                         float(row["user_avg_daily_transactions"]),
                         float(row["user_avg_transaction_hour"]),
-                        12.9716 + (idx % 100) * 0.001,
-                        77.5946 + (idx % 100) * 0.001,
+                        # Nigerian city centre + per-row offset (was Bangalore
+                        # 12.9716/77.5946 - every seeded profile sat in India).
+                        round(NG_PLACES[idx % len(NG_PLACES)][2] + (idx % 100) * 0.001, 4),
+                        round(NG_PLACES[idx % len(NG_PLACES)][3] + (idx % 100) * 0.001, 4),
                         datetime.utcnow().isoformat()
                     ))
 
@@ -903,6 +908,63 @@ class TransactionRepository:
             """)
             deleted = cursor.rowcount
             return deleted if deleted and deleted > 0 else 0
+
+    def migrate_nigerian_coordinates(self) -> dict:
+        """One-off (idempotent) data repair: rewrite every coordinate that
+        sits outside Nigeria onto a random Nigerian city + small jitter.
+
+        Historic rows were seeded from Indian profile coordinates (Bangalore
+        12.9716/77.5946), so live ledgers carried Indian lat/lon pairs.
+        Called by POST /transactions/migrate-nigerian-coordinates; rows
+        already inside the country are left untouched, and a second run
+        reports zero updates."""
+        from backend.app.services.nigeria_places import NG_LAT_MIN, NG_LAT_MAX, NG_LON_MIN, NG_LON_MAX
+
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT transaction_id, location_latitude, location_longitude
+                FROM transactions
+                WHERE location_latitude IS NOT NULL
+                  AND location_longitude IS NOT NULL
+                  AND NOT (
+                    location_latitude BETWEEN %s AND %s
+                    AND location_longitude BETWEEN %s AND %s
+                  )
+            """, (NG_LAT_MIN, NG_LAT_MAX, NG_LON_MIN, NG_LON_MAX))
+            outside_txns = cursor.fetchall()
+
+            for row in outside_txns:
+                new_lat, new_lon, _, _ = jittered_place()
+                conn.execute("""
+                    UPDATE transactions
+                    SET location_latitude = %s, location_longitude = %s
+                    WHERE transaction_id = %s
+                """, (new_lat, new_lon, row["transaction_id"]))
+
+            cursor = conn.execute("""
+                SELECT user_id FROM user_profiles
+                WHERE last_latitude IS NOT NULL
+                  AND last_longitude IS NOT NULL
+                  AND NOT (
+                    last_latitude BETWEEN %s AND %s
+                    AND last_longitude BETWEEN %s AND %s
+                  )
+            """, (NG_LAT_MIN, NG_LAT_MAX, NG_LON_MIN, NG_LON_MAX))
+            outside_profiles = cursor.fetchall()
+
+            for row in outside_profiles:
+                new_lat, new_lon, _, _ = jittered_place()
+                conn.execute("""
+                    UPDATE user_profiles
+                    SET last_latitude = %s, last_longitude = %s
+                    WHERE user_id = %s
+                """, (new_lat, new_lon, row["user_id"]))
+
+            conn.commit()
+            return {
+                "transactions_updated": len(outside_txns),
+                "profiles_updated": len(outside_profiles),
+            }
 
     def stream_transactions_in_range(self, start_date: str, end_date: str):
         """Server-side named cursor for the admin CSV export. Rows are

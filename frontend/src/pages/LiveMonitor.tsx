@@ -4,6 +4,7 @@ import { resolveTransaction, suspendTransaction, bulkSuspendTransactions, getSto
 import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
+import { formatPlace, isInNigeria } from "../utils/nigeriaPlaces";
 
 interface LiveMonitorProps {
   onRefresh: () => void;
@@ -746,6 +747,9 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                     <span className="text-dark-muted block font-semibold">Geo location coordinates</span>
                     <span className="text-dark-text font-mono text-xs">
                       {selectedTxn.location_latitude.toFixed(4)}, {selectedTxn.location_longitude.toFixed(4)}
+                    </span>
+                    <span className={`block text-xs font-semibold ${isInNigeria(selectedTxn.location_latitude, selectedTxn.location_longitude) ? "text-guard-orange" : "text-red-400"}`}>
+                      {formatPlace(selectedTxn.location_latitude, selectedTxn.location_longitude)}
                     </span>
                   </div>
                 </div>

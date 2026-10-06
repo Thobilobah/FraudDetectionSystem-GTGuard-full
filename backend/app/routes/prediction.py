@@ -8,6 +8,14 @@ from backend.app.services.feature_engineering import FeatureEngineeringService
 from backend.app.services.prediction_service import prediction_service
 from backend.app.repositories.transaction_repository import db_repo, WINDOW_LIMIT
 from backend.app.services.rate_limiter import check_rate_limit
+from backend.app.services.nigeria_places import (
+    clamp_to_nigeria, far_nigerian_city, is_in_nigeria,
+)
+
+# Manual-test rows (POST /predict/features without coordinates) used to fall
+# back to 22.5942/85.9754 - a point in India. Default to central Abuja so
+# every stored row is a Nigerian coordinate pair.
+DEFAULT_NG_LAT, DEFAULT_NG_LON = 9.0579, 7.4951
 
 router = APIRouter()
 
@@ -120,8 +128,8 @@ def predict_raw_features(features: FeatureVector, request: Request):
             timestamp=features.timestamp or datetime.now().isoformat(),
             beneficiary_id=features.beneficiary_id or "acct_manual@ussd",
             device_id=features.device_id or "dev_manual",
-            latitude=features.location_latitude if features.location_latitude is not None else 22.5942,
-            longitude=features.location_longitude if features.location_longitude is not None else 85.9754,
+            latitude=features.location_latitude if features.location_latitude is not None else DEFAULT_NG_LAT,
+            longitude=features.location_longitude if features.location_longitude is not None else DEFAULT_NG_LON,
             is_fraud=pred_res["prediction"],
             prob=pred_res["fraud_probability"],
             score=pred_res["risk_score"],
@@ -247,6 +255,11 @@ def _build_demo_attempt(scenario: str, target_level: str, user_id: str) -> dict:
     avg_amount = (user_profile["avg_amount"] if user_profile else None) or 1500.0
     last_lat = (user_profile["last_latitude"] if user_profile else None) or 6.5244
     last_lon = (user_profile["last_longitude"] if user_profile else None) or 3.3792
+    # Profiles seeded before the Nigerian-coordinates fix still carry Indian
+    # city coords - snap any out-of-country profile onto central Lagos so
+    # every scenario derives a Nigerian location regardless of DB vintage.
+    if not is_in_nigeria(last_lat, last_lon):
+        last_lat, last_lon = 6.5244, 3.3792
 
     timestamp = datetime.now()
     synthetic_rows: list[dict] = []
@@ -264,9 +277,11 @@ def _build_demo_attempt(scenario: str, target_level: str, user_id: str) -> dict:
         transaction_type = random.choice(["P2P", "P2M", "Merchant"])
         beneficiary_id = f"acct_{random.randint(100, 999)}@ussd"
         device_id = f"dev_{random.randint(100, 999)}"
-        # Location is very close to the user's last known position
-        location_latitude = round(last_lat + random.uniform(-0.005, 0.005), 4)
-        location_longitude = round(last_lon + random.uniform(-0.005, 0.005), 4)
+        # Location is a few metres around the user's (Nigerian) home position
+        location_latitude, location_longitude = clamp_to_nigeria(
+            round(last_lat + random.uniform(-0.005, 0.005), 4),
+            round(last_lon + random.uniform(-0.005, 0.005), 4),
+        )
         payment_method = random.choice(["USSD", "USSD", "USSD", "Net Banking", "Debit Card", "Wallet"])
         # Try the randomized amount first so amounts stay varied; only if the
         # model disagrees with the scenario's LOW tier does the ladder below
@@ -295,18 +310,24 @@ def _build_demo_attempt(scenario: str, target_level: str, user_id: str) -> dict:
             # New, unfamiliar beneficiary and device
             beneficiary_id = "acct_suspicious_mule@ussd"
             device_id = "dev_unfamiliar"
-            # Location is moderately far (30-80 km)
-            location_latitude = round(last_lat + random.uniform(0.3, 0.8), 4)
-            location_longitude = round(last_lon + random.uniform(0.3, 0.8), 4)
+            # Location is moderately far (30-80 km) but clamped inside
+            # Nigeria - the raw +0.3/+0.8 degree offset could push a border
+            # profile (e.g. northern Borno) into Cameroon/Niger.
+            location_latitude, location_longitude = clamp_to_nigeria(
+                round(last_lat + random.uniform(0.3, 0.8), 4),
+                round(last_lon + random.uniform(0.3, 0.8), 4),
+            )
             payment_method = random.choice(["Debit Card", "Net Banking", "Mobile Transfer", "Wallet"])
 
         else:  # high_risk
             transaction_type = "P2P"
             beneficiary_id = "acct_flagged_fraud_wallet@ussd"
             device_id = "dev_blacklisted_malware"
-            # Location is extremely far (impossible travel: 600+ km away)
-            location_latitude = round(last_lat + random.uniform(6.0, 12.0), 4)
-            location_longitude = round(last_lon + random.uniform(6.0, 12.0), 4)
+            # Impossible-travel jump: a far NIGERIAN city 500+ km away
+            # (the old +6/+12 degree offset landed in Niger/Algeria). Still
+            # far enough to plausibly trip the >800km/h velocity check
+            # against the 2-minutes-ago context row below.
+            location_latitude, location_longitude = far_nigerian_city(last_lat, last_lon)
             payment_method = random.choice(["Debit Card", "Mobile Transfer", "Wallet", "Net Banking"])
             # A transaction at the user's last known location 2 minutes ago,
             # so the jump to the far-away coordinates above trips the

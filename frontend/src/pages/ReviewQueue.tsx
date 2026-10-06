@@ -10,6 +10,7 @@ import { getStoredUser, getTransactionsPage, resolveTransaction, getTransactionB
          type QueueMetrics, type RecentOutcomes } from "../services/api";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
+import { formatPlace, isInNigeria } from "../utils/nigeriaPlaces";
 
 const POLL_MS = 10000;
 
@@ -871,6 +872,9 @@ export const ReviewQueue: React.FC = () => {
                     <span className="text-dark-muted block font-semibold">Geo location coordinates</span>
                     <span className="text-dark-text font-mono text-xs">
                       {selectedTxn.location_latitude.toFixed(4)}, {selectedTxn.location_longitude.toFixed(4)}
+                    </span>
+                    <span className={`block text-xs font-semibold ${isInNigeria(selectedTxn.location_latitude, selectedTxn.location_longitude) ? "text-guard-orange" : "text-red-400"}`}>
+                      {formatPlace(selectedTxn.location_latitude, selectedTxn.location_longitude)}
                     </span>
                   </div>
                 </div>

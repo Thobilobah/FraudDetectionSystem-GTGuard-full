@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 import { FraudGauge } from "../components/FraudGauge";
+import { formatPlace, isInNigeria } from "../utils/nigeriaPlaces";
 
 export const TransactionAnalyzer: React.FC = () => {
   const { showToast } = useToast();
@@ -387,6 +388,12 @@ export const TransactionAnalyzer: React.FC = () => {
                       onChange={(e) => setRawTxn({ ...rawTxn, location_longitude: parseFloat(e.target.value) || 0 })}
                       className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full mt-1 focus:border-brand-primary focus:outline-none" 
                     />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="text-xs text-dark-muted block">Place</label>
+                    <span className={`text-xs font-semibold block mt-1 ${isInNigeria(rawTxn.location_latitude, rawTxn.location_longitude) ? "text-guard-orange" : "text-red-400"}`}>
+                      {formatPlace(rawTxn.location_latitude, rawTxn.location_longitude)}
+                    </span>
                   </div>
                   <div>
                     <label className="text-xs text-dark-muted block">Payment Method</label>
