@@ -245,7 +245,7 @@ export const getRecentOutcomes = async (
 };
 
 export interface FeedbackConfusionMatrix {
-  days: number;
+  days: number | null;
   total: number;
   tp: number;
   fp: number;
@@ -260,14 +260,16 @@ export interface FeedbackConfusionMatrix {
 
 /**
  * Live confusion matrix from human decisions (admin): analyst resolve
- * verdicts as ground truth vs the model_prediction snapshot. Excludes
- * system:policy auto-resolves - only human feedback counts.
+ * verdicts as ground truth vs the model_prediction snapshot, over ALL
+ * transaction history by default (omit `days` for full history, or pass
+ * a positive int for a rolling window). Excludes system:policy
+ * auto-resolves - only human feedback counts.
  */
 export const getFeedbackConfusionMatrix = async (
-  days = 30
+  days?: number
 ): Promise<FeedbackConfusionMatrix> => {
   const response = await api.get("/transactions/confusion-matrix", {
-    params: { days },
+    params: days ? { days } : {},
   });
   return response.data;
 };

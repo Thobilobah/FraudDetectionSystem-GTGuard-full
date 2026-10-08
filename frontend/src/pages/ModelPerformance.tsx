@@ -32,7 +32,7 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
   useEffect(() => {
     let mounted = true;
     setFbState("loading");
-    getFeedbackConfusionMatrix(30)
+    getFeedbackConfusionMatrix()
       .then((d) => {
         if (mounted) {
           setFb(d);
@@ -111,7 +111,7 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
           <div className="flex-1">
             <h3 className="text-base font-semibold text-dark-text">Confusion Matrix (Live Analyst Feedback)</h3>
             <p className="text-xs text-dark-muted">
-              Model verdict vs the human decision — human-resolved transactions, last 30 days (policy auto-resolves excluded)
+              Model verdict vs the human decision — every analyst-resolved transaction in history (policy auto-resolves excluded)
             </p>
           </div>
           <button

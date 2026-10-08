@@ -915,7 +915,7 @@ class TransactionRepository:
             "ids": resolved_ids,
         }
 
-    def get_feedback_confusion_matrix(self, days: int = 30) -> dict:
+    def get_feedback_confusion_matrix(self, days: int | None = None) -> dict:
         """Live confusion matrix built from HUMAN verdicts, not the frozen
         training holdout.
 
@@ -926,12 +926,17 @@ class TransactionRepository:
 
         Only human-resolved rows count: unresolved rows have no ground truth
         yet, and system:policy auto-resolves are machine decisions, not
-        customer feedback. One FILTER-aggregate pass over the resolved
-        subset; resolved_at rides the ISO-text comparison the same way
-        created_at windows do elsewhere."""
-        window_start = (datetime.now() - timedelta(days=days)).isoformat()
+        customer feedback. `days=None` (default) covers ALL transaction
+        history; a positive int restricts to a rolling window. One
+        FILTER-aggregate pass either way; the optional resolved_at window
+        uses the same ISO-text comparison as the created_at windows."""
+        params: list = []
+        where_extra = ""
+        if days:
+            where_extra = "AND resolved_at >= ?"
+            params.append((datetime.now() - timedelta(days=days)).isoformat())
         with self.get_connection() as conn:
-            cursor = conn.execute("""
+            cursor = conn.execute(f"""
                 SELECT
                     COUNT(*) AS total,
                     COUNT(*) FILTER (WHERE model_prediction = 1 AND is_fraud = 1) AS tp,
@@ -944,8 +949,8 @@ class TransactionRepository:
                   AND is_fraud IS NOT NULL
                   AND resolved_by IS NOT NULL
                   AND resolved_by <> 'system:policy'
-                  AND resolved_at >= ?
-            """, (window_start,))
+                  {where_extra}
+            """, tuple(params))
             row = cursor.fetchone()
 
         total = row["total"] or 0

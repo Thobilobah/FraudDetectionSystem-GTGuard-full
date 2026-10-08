@@ -82,7 +82,7 @@ def migrate_nigerian_coordinates(current_user: dict = Depends(require_admin)):
 
 @router.get("/transactions/confusion-matrix")
 def get_feedback_confusion_matrix(
-    days: int = Query(30, ge=1, le=365),
+    days: int | None = Query(None, ge=1, le=3650),
     current_user: dict = Depends(require_admin),
 ):
     """Admin: confusion matrix measured against human decisions.
@@ -90,8 +90,9 @@ def get_feedback_confusion_matrix(
     The validation-split matrix in model_metadata.json is frozen at training
     time; this one treats the analyst's resolve verdict (BLOCKED=fraud,
     APPROVED=genuine) as ground truth and the model_prediction snapshot as
-    the classifier output, over human-resolved rows from the last `days`
-    days. system:policy auto-resolves are excluded - they are machine
+    the classifier output, over ALL human-resolved transaction history.
+    Omit `days` for full history, or pass a positive int for a rolling
+    window. system:policy auto-resolves are excluded - they are machine
     decisions, not customer feedback."""
     try:
         return db_repo.get_feedback_confusion_matrix(days)
