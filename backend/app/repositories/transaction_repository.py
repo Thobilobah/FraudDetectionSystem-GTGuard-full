@@ -18,6 +18,7 @@ import json
 import time
 from datetime import datetime, timedelta
 import pandas as pd
+from backend.app.services.nigeria_places import NIGERIAN_PLACES
 import psycopg2
 import psycopg2.extras
 from psycopg2 import pool as pg_pool
@@ -709,12 +710,19 @@ class TransactionRepository:
             return [dict(row) for row in cursor.fetchall()]
 
     @staticmethod
-    def _build_filters(search: str, risk_level: str, status: str, flagged_by: str = "") -> tuple:
+    def _build_filters(search: str, risk_level: str, status: str, flagged_by: str = "",
+                       payment_method: str = "", location: str = "") -> tuple:
         """Translate the pagination query params into (sql_fragment, params).
         Values are always bound as parameters (never f-string'd) to keep the
         existing ? -> %s placeholder wrapper happy and injection safe.
         `flagged_by` matches claimed_by exactly, so each analyst can list only
-        the transactions they personally flagged/routed to the admin."""
+        the transactions they personally flagged/routed to the admin.
+        `payment_method` is an exact match, with NULL rows counting as USSD
+        (that is how the UI displays them). `location` is a Nigerian state
+        name: each row is classified by nearest city from the places table -
+        the same labelling used by the API formatters - then matched on that
+        state. Only the state is bound; the city table is our own constant,
+        escaped and inlined, and rows without coordinates never match."""
         clauses = []
         params = []
         if search:
@@ -737,23 +745,45 @@ class TransactionRepository:
         if flagged_by:
             clauses.append("claimed_by = ?")
             params.append(flagged_by)
+        if payment_method:
+            clauses.append("COALESCE(payment_method, 'USSD') = ?")
+            params.append(payment_method)
+        if location:
+            places_values = ", ".join(
+                "('%s'::text, '%s'::text, %r::float, %r::float)"
+                % (name.replace("'", "''"), state.replace("'", "''"), lat, lon)
+                for name, state, lat, lon in NIGERIAN_PLACES
+            )
+            clauses.append(
+                "location_latitude IS NOT NULL AND location_longitude IS NOT NULL AND ("
+                "SELECT p.state FROM (VALUES " + places_values + ") AS p(name, state, lat, lon) "
+                "ORDER BY 6371.0 * 2 * asin(least(1.0, sqrt("
+                "power(sin(radians(p.lat - transactions.location_latitude) / 2.0), 2) + "
+                "cos(radians(transactions.location_latitude)) * cos(radians(p.lat)) * "
+                "power(sin(radians(p.lon - transactions.location_longitude) / 2.0), 2"
+                ")))) LIMIT 1) = ?"
+            )
+            params.append(location)
         where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         return where_sql, params
 
     def get_transactions_page(self, limit: int = 50, offset: int = 0,
                               search: str = "", risk_level: str = "", status: str = "",
-                              sort: str = "desc", flagged_by: str = "") -> list:
+                              sort: str = "desc", flagged_by: str = "",
+                              payment_method: str = "", location: str = "") -> list:
         """Paginated, filtered transaction listing for the ledger. Filters are
         bound params. `sort` is whitelisted (desc|asc|risk) so it can never
         inject SQL: desc = newest first, asc = oldest first (ageing view),
-        risk = highest risk_score first (triage view)."""
+        risk = highest risk_score first (triage view). `location` is a
+        Nigerian state, matched on nearest city (see _build_filters)."""
         if sort == "risk":
             order_sql = "ORDER BY risk_score DESC NULLS LAST, created_at DESC"
         elif sort == "asc":
             order_sql = "ORDER BY created_at ASC"
         else:
             order_sql = "ORDER BY created_at DESC"
-        where_sql, params = self._build_filters(search, risk_level, status, flagged_by)
+        where_sql, params = self._build_filters(search, risk_level, status, flagged_by,
+                                                 payment_method, location)
         with self.get_connection() as conn:
             cursor = conn.execute(f"""
                 SELECT * FROM transactions
@@ -764,8 +794,10 @@ class TransactionRepository:
             return [dict(row) for row in cursor.fetchall()]
 
     def count_transactions(self, search: str = "", risk_level: str = "", status: str = "",
-                           flagged_by: str = "") -> int:
-        where_sql, params = self._build_filters(search, risk_level, status, flagged_by)
+                           flagged_by: str = "", payment_method: str = "",
+                           location: str = "") -> int:
+        where_sql, params = self._build_filters(search, risk_level, status, flagged_by,
+                                                 payment_method, location)
         with self.get_connection() as conn:
             cursor = conn.execute(f"SELECT COUNT(*) AS total FROM transactions {where_sql}", tuple(params))
             return cursor.fetchone()["total"]

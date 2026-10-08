@@ -115,6 +115,8 @@ export interface TransactionPageParams {
   status?: string;
   sort?: "desc" | "asc" | "risk";
   flagged_by?: string;
+  payment_method?: string;
+  location?: string;
 }
 
 export const getTransactionsPage = async (params: TransactionPageParams = {}): Promise<TransactionPage> => {

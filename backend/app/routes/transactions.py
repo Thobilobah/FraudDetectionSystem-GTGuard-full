@@ -28,6 +28,8 @@ def get_transactions(
     status: str = Query("", description="APPROVED | PENDING | SUSPENDED | BLOCKED | RESOLVED (= APPROVED+BLOCKED) (empty = all)"),
     sort: str = Query("desc", description="desc (newest first) | asc (oldest first/ageing) | risk (highest risk score first)"),
     flagged_by: str = Query("", description="Exact claimant email - each analyst's own flagged work"),
+    payment_method: str = Query("", description="USSD | Debit Card | Net Banking | Mobile Transfer | Wallet (empty = all)"),
+    location: str = Query("", description="Nigerian state name, matched on nearest city (empty = all)"),
 ):
     try:
         # Paginated + filtered ledger. Returns {items, total, limit, offset} so
@@ -38,10 +40,12 @@ def get_transactions(
             limit=limit, offset=offset,
             search=search.strip(), risk_level=risk_level.strip(), status=status.strip(),
             sort=sort, flagged_by=flagged_by.strip(),
+            payment_method=payment_method.strip(), location=location.strip(),
         )
         total = db_repo.count_transactions(
             search=search.strip(), risk_level=risk_level.strip(), status=status.strip(),
             flagged_by=flagged_by.strip(),
+            payment_method=payment_method.strip(), location=location.strip(),
         )
 
         # Deserialize JSON rules for frontend mapping

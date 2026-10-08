@@ -1,13 +1,21 @@
 import React, { useState, useEffect, useRef } from "react";
 import type { Transaction } from "../types";
-import { Search, ShieldAlert, ShieldCheck, Calendar, Filter, ArrowUpDown, PauseCircle, Download, Loader2, AlertCircle, ChevronLeft, ChevronRight } from "lucide-react";
+import { Search, ShieldAlert, ShieldCheck, Calendar, Filter, PauseCircle, Download, Loader2, AlertCircle, ChevronLeft, ChevronRight, MapPin } from "lucide-react";
 import { getStoredUser, exportTransactionsCsv, getTransactionsPage } from "../services/api";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
+import { NIGERIAN_PLACES, formatPlace } from "../utils/nigeriaPlaces";
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
+// Filter option lists. Methods mirror the analyzer's select and the
+// scenario generators; locations are the Nigerian states behind the
+// embedded places table (rows are matched server-side on nearest city).
+const METHOD_OPTIONS = ["USSD", "Debit Card", "Net Banking", "Mobile Transfer", "Wallet"];
+const STATE_OPTIONS = Array.from(new Set(NIGERIAN_PLACES.map((p) => p.state))).sort();
+const stateLabel = (state: string) => (state === "FCT" ? "FCT (Abuja)" : `${state} State`);
 
 export const TransactionHistory: React.FC = () => {
   const { showToast } = useToast();
@@ -25,7 +33,8 @@ export const TransactionHistory: React.FC = () => {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [riskFilter, setRiskFilter] = useState<string>("ALL");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
-  const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
+  const [methodFilter, setMethodFilter] = useState<string>("ALL");
+  const [locationFilter, setLocationFilter] = useState<string>("ALL");
   const [page, setPage] = useState(0); // zero-based
   const [pageSize, setPageSize] = useState(50);
   const [rows, setRows] = useState<Transaction[]>([]);
@@ -81,7 +90,8 @@ export const TransactionHistory: React.FC = () => {
       search: debouncedSearch,
       risk_level: riskFilter === "ALL" ? "" : riskFilter,
       status: statusFilter === "ALL" ? "" : statusFilter,
-      sort: sortOrder,
+      payment_method: methodFilter === "ALL" ? "" : methodFilter,
+      location: locationFilter === "ALL" ? "" : locationFilter,
     })
       .then((data) => {
         if (cancelled) return;
@@ -106,7 +116,7 @@ export const TransactionHistory: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [page, pageSize, debouncedSearch, riskFilter, statusFilter, sortOrder]);
+  }, [page, pageSize, debouncedSearch, riskFilter, statusFilter, methodFilter, locationFilter]);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const fromRow = total === 0 ? 0 : page * pageSize + 1;
@@ -212,7 +222,7 @@ export const TransactionHistory: React.FC = () => {
         </div>
 
         {/* Dropdowns */}
-        <div className="flex flex-wrap md:flex-nowrap gap-3 w-full md:w-auto items-center">
+        <div className="flex flex-wrap gap-3 w-full md:w-auto items-center">
           <div className="flex items-center gap-1.5 w-full md:w-auto">
             <Filter className="h-4 w-4 text-dark-muted" />
             <select
@@ -239,13 +249,27 @@ export const TransactionHistory: React.FC = () => {
             <option value="BLOCKED">Blocked Fraud</option>
           </select>
 
-          <button
-            onClick={() => { setSortOrder(prev => prev === "desc" ? "asc" : "desc"); setPage(0); }}
-            className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 flex items-center gap-1.5 transition hover:bg-dark-border/20 w-full md:w-auto justify-center"
+          <select
+            value={methodFilter}
+            onChange={(e) => { setMethodFilter(e.target.value); setPage(0); }}
+            className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full md:w-40 focus:border-brand-primary focus:outline-none font-semibold"
           >
-            <ArrowUpDown className="h-4 w-4" /> 
-            {sortOrder === "desc" ? "Newest First" : "Oldest First"}
-          </button>
+            <option value="ALL">All Methods</option>
+            {METHOD_OPTIONS.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+
+          <select
+            value={locationFilter}
+            onChange={(e) => { setLocationFilter(e.target.value); setPage(0); }}
+            className="bg-dark-bg border border-dark-border text-dark-text text-xs rounded-lg p-2.5 w-full md:w-44 focus:border-brand-primary focus:outline-none font-semibold"
+          >
+            <option value="ALL">All Locations</option>
+            {STATE_OPTIONS.map((s) => (
+              <option key={s} value={s}>{stateLabel(s)}</option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -261,6 +285,7 @@ export const TransactionHistory: React.FC = () => {
                   <th className="px-3 py-3">User Account</th>
                   <th className="px-3 py-3">Beneficiary</th>
                   <th className="px-3 py-3">Method</th>
+                  <th className="px-3 py-3">Location</th>
                   <th className="px-3 py-3">Amount</th>
                   <th className="px-3 py-3 text-center">Score</th>
                   <th className="px-3 py-3 text-center">Risk</th>
@@ -272,7 +297,7 @@ export const TransactionHistory: React.FC = () => {
               <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
                 {isLoading && rows.length === 0 && (
                   <tr>
-                    <td colSpan={11} className="px-3 py-12 text-center">
+                    <td colSpan={12} className="px-3 py-12 text-center">
                       <Loader2 className="h-6 w-6 animate-spin text-guard-orange mx-auto" />
                       <p className="text-xs text-dark-muted mt-2">Loading transactions…</p>
                     </td>
@@ -300,6 +325,10 @@ export const TransactionHistory: React.FC = () => {
                       <span className="bg-gray-100 dark:bg-white/10 text-gray-700 dark:text-dark-muted border border-gray-200 dark:border-dark-border px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider">
                         {row.payment_method || "USSD"}
                       </span>
+                    </td>
+                    <td className="px-3 py-3.5 text-xs text-dark-muted font-semibold flex items-center gap-1.5 whitespace-nowrap">
+                      <MapPin className="h-3.5 w-3.5 shrink-0" />
+                      {formatPlace(row.location_latitude, row.location_longitude)}
                     </td>
                     <td className="px-3 py-3.5 text-dark-text font-bold">
                       ₦{row.amount.toLocaleString('en-NG')}
