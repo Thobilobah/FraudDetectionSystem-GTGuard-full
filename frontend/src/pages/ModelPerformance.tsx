@@ -1,8 +1,9 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import type { ModelMetadata, ModelComparison, FeatureImportance } from "../types";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
-import { Award, Zap, BarChart3, Database } from "lucide-react";
+import { Award, Zap, BarChart3, Database, Users, RefreshCw } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
+import { getFeedbackConfusionMatrix, type FeedbackConfusionMatrix } from "../services/api";
 
 interface ModelPerformanceProps {
   modelMeta: ModelMetadata | null;
@@ -22,6 +23,30 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
   const { theme } = useTheme();
   const gridStroke = theme === "dark" ? "#292C33" : "#E5E7EB";
   const axisStroke = "#9CA3AF";
+
+  // Live matrix: model predictions vs analyst verdicts (admin endpoint).
+  const [fb, setFb] = useState<FeedbackConfusionMatrix | null>(null);
+  const [fbState, setFbState] = useState<"loading" | "ok" | "forbidden" | "error">("loading");
+  const [fbTick, setFbTick] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    setFbState("loading");
+    getFeedbackConfusionMatrix(30)
+      .then((d) => {
+        if (mounted) {
+          setFb(d);
+          setFbState("ok");
+        }
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        setFbState(err?.response?.status === 403 ? "forbidden" : "error");
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [fbTick]);
 
   const formatPercent = (val: number) => `${(val * 100).toFixed(1)}%`;
 
@@ -121,6 +146,106 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
           </div>
         </div>
       )}
+
+      {/* Live analyst-feedback confusion matrix: human decisions as ground
+          truth vs the model's snapshot prediction. Complements the frozen
+          validation-split matrix above — reviewers drive this number. */}
+      <div className="bg-dark-card border border-dark-border p-5 rounded-xl shadow-glow-brand">
+        <div className="flex items-center gap-2 mb-4">
+          <div className="p-2 rounded bg-guard-orangeLight text-guard-orange">
+            <Users className="h-5 w-5" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-base font-semibold text-dark-text">Confusion Matrix (Live Analyst Feedback)</h3>
+            <p className="text-xs text-dark-muted">
+              Model verdict vs the human decision — human-resolved transactions, last 30 days (policy auto-resolves excluded)
+            </p>
+          </div>
+          <button
+            onClick={() => setFbTick((t) => t + 1)}
+            disabled={fbState === "loading"}
+            className="flex items-center gap-1.5 text-xs font-semibold text-dark-muted hover:text-dark-text border border-dark-border rounded-lg px-2.5 py-1.5 transition disabled:opacity-50"
+            title="Refresh"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${fbState === "loading" ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
+
+        {fbState === "loading" && (
+          <div className="h-40 flex items-center justify-center text-dark-muted text-xs">
+            Loading analyst feedback…
+          </div>
+        )}
+        {fbState === "forbidden" && (
+          <div className="h-40 flex items-center justify-center text-dark-muted text-xs">
+            Admin access required to view the feedback matrix.
+          </div>
+        )}
+        {fbState === "error" && (
+          <div className="h-40 flex items-center justify-center text-dark-muted text-xs">
+            Feedback matrix unavailable right now.
+          </div>
+        )}
+        {fbState === "ok" && fb && fb.total === 0 && (
+          <div className="h-40 flex items-center justify-center text-dark-muted text-xs text-center px-6">
+            No analyst-resolved transactions yet — resolve rows in the Review
+            Queue and their verdicts will appear here as ground truth.
+          </div>
+        )}
+        {fbState === "ok" && fb && fb.total > 0 && (
+          <>
+            <div className="grid grid-cols-2 gap-4 max-w-md mx-auto pt-3">
+              {/* TN */}
+              <div className="bg-gray-50 dark:bg-white/5 border border-dark-border p-4 rounded-xl text-center space-y-1.5">
+                <span className="text-[10px] text-brand-success font-extrabold tracking-wider block uppercase">True Negative (TN)</span>
+                <span className="text-2xl font-bold text-dark-text">{fb.tn}</span>
+                <span className="text-[10px] text-dark-muted block">Genuine approved — model agreed</span>
+              </div>
+              {/* FP */}
+              <div className="bg-gray-50 dark:bg-white/5 border border-brand-warning/20 p-4 rounded-xl text-center space-y-1.5">
+                <span className="text-[10px] text-brand-warning font-extrabold tracking-wider block uppercase">False Positive (FP)</span>
+                <span className="text-2xl font-bold text-dark-text">{fb.fp}</span>
+                <span className="text-[10px] text-dark-muted block">Model flagged, human approved</span>
+              </div>
+              {/* FN */}
+              <div className="bg-gray-50 dark:bg-white/5 border border-brand-danger/20 p-4 rounded-xl text-center space-y-1.5">
+                <span className="text-[10px] text-brand-danger/60 font-extrabold tracking-wider block uppercase">False Negative (FN)</span>
+                <span className="text-2xl font-bold text-dark-text">{fb.fn}</span>
+                <span className="text-[10px] text-dark-muted block">Model cleared, human blocked</span>
+              </div>
+              {/* TP */}
+              <div className="bg-gray-50 dark:bg-white/5 border border-brand-success/40 p-4 rounded-xl text-center space-y-1.5">
+                <span className="text-[10px] text-brand-success font-extrabold tracking-wider block uppercase">True Positive (TP)</span>
+                <span className="text-2xl font-bold text-dark-text">{fb.tp}</span>
+                <span className="text-[10px] text-dark-muted block">Fraud blocked — model agreed</span>
+              </div>
+            </div>
+
+            <div className="border-t border-dark-border mt-4 pt-4 grid grid-cols-4 gap-3 text-center text-xs">
+              <div className="bg-gray-50/50 dark:bg-white/5 p-2 rounded">
+                <span className="text-dark-muted block font-semibold">Accuracy</span>
+                <span className="text-sm font-bold text-dark-text">{formatPercent(fb.accuracy)}</span>
+              </div>
+              <div className="bg-gray-50/50 dark:bg-white/5 p-2 rounded">
+                <span className="text-dark-muted block font-semibold">Precision</span>
+                <span className="text-sm font-bold text-dark-text">{formatPercent(fb.precision)}</span>
+              </div>
+              <div className="bg-gray-50/50 dark:bg-white/5 p-2 rounded">
+                <span className="text-dark-muted block font-semibold">Recall</span>
+                <span className="text-sm font-bold text-dark-text">{formatPercent(fb.recall)}</span>
+              </div>
+              <div className="bg-gray-50/50 dark:bg-white/5 p-2 rounded">
+                <span className="text-dark-muted block font-semibold">F1</span>
+                <span className="text-sm font-bold text-dark-text">{formatPercent(fb.f1)}</span>
+              </div>
+            </div>
+            <p className="text-[10px] text-dark-muted text-center mt-3">
+              Based on {fb.total} human decision{fb.total === 1 ? "" : "s"} · {fb.analyst_flagged} analyst-flagged
+            </p>
+          </>
+        )}
+      </div>
 
       {/* Model Benchmark Table */}
       <div className="bg-dark-card border border-dark-border rounded-xl shadow-glow-brand overflow-hidden">

@@ -244,6 +244,34 @@ export const getRecentOutcomes = async (
   return response.data;
 };
 
+export interface FeedbackConfusionMatrix {
+  days: number;
+  total: number;
+  tp: number;
+  fp: number;
+  tn: number;
+  fn: number;
+  analyst_flagged: number;
+  accuracy: number;
+  precision: number;
+  recall: number;
+  f1: number;
+}
+
+/**
+ * Live confusion matrix from human decisions (admin): analyst resolve
+ * verdicts as ground truth vs the model_prediction snapshot. Excludes
+ * system:policy auto-resolves - only human feedback counts.
+ */
+export const getFeedbackConfusionMatrix = async (
+  days = 30
+): Promise<FeedbackConfusionMatrix> => {
+  const response = await api.get("/transactions/confusion-matrix", {
+    params: { days },
+  });
+  return response.data;
+};
+
 /**
  * Admin-only: downloads a CSV report for the given date range and triggers
  * a browser save-as, so an admin can see who claimed/resolved every

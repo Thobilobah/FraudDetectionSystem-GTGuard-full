@@ -80,6 +80,24 @@ def migrate_nigerian_coordinates(current_user: dict = Depends(require_admin)):
         raise HTTPException(status_code=500, detail=f"Coordinate migration failed: {str(e)}")
     return {"status": "ok", **result}
 
+@router.get("/transactions/confusion-matrix")
+def get_feedback_confusion_matrix(
+    days: int = Query(30, ge=1, le=365),
+    current_user: dict = Depends(require_admin),
+):
+    """Admin: confusion matrix measured against human decisions.
+
+    The validation-split matrix in model_metadata.json is frozen at training
+    time; this one treats the analyst's resolve verdict (BLOCKED=fraud,
+    APPROVED=genuine) as ground truth and the model_prediction snapshot as
+    the classifier output, over human-resolved rows from the last `days`
+    days. system:policy auto-resolves are excluded - they are machine
+    decisions, not customer feedback."""
+    try:
+        return db_repo.get_feedback_confusion_matrix(days)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Confusion matrix failed: {str(e)}")
+
 @router.get("/transactions/export")
 def export_transactions_csv(
     start_date: str = Query(..., description="ISO date, e.g. 2026-09-01"),

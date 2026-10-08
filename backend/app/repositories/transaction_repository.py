@@ -32,7 +32,9 @@ _PLACEHOLDER_RE = re.compile(r"\?")
 # new migration step below; existing databases whose app_settings.schema_version
 # already matches skip the per-column information_schema checks on every cold
 # start (those checks were a serverless startup-cost multiplier).
-SCHEMA_VERSION = "3"
+# v4: model_prediction - immutable snapshot of the model's verdict at write
+# time (resolve used to overwrite the only copy of it inside is_fraud).
+SCHEMA_VERSION = "4"
 
 # Cap how many historical rows feature engineering will load per queried
 # user/beneficiary. Bounded windows keep prediction latency flat as the
@@ -186,6 +188,7 @@ class TransactionRepository:
                     location_latitude REAL,
                     location_longitude REAL,
                     is_fraud INTEGER,
+                    model_prediction INTEGER,
                     fraud_probability REAL,
                     risk_score INTEGER,
                     risk_level TEXT,
@@ -273,7 +276,7 @@ class TransactionRepository:
             with self.get_connection() as conn:
                 # Migration check: add any columns that don't exist yet
                 # (payment_method, status, resolved_by, resolved_at, claimed_by,
-                # claimed_at) - safe to re-run on an existing DB.
+                # claimed_at, model_prediction) - safe to re-run on an existing DB.
                 for col_name, col_def in [
                     ("payment_method", "TEXT DEFAULT 'USSD'"),
                     ("status", "TEXT DEFAULT 'APPROVED'"),
@@ -281,6 +284,7 @@ class TransactionRepository:
                     ("resolved_at", "TEXT"),
                     ("claimed_by", "TEXT"),
                     ("claimed_at", "TEXT"),
+                    ("model_prediction", "INTEGER"),
                 ]:
                     col_check = conn.execute("""
                         SELECT column_name FROM information_schema.columns
@@ -288,6 +292,23 @@ class TransactionRepository:
                     """, (col_name,))
                     if not col_check.fetchone():
                         conn.execute(f"ALTER TABLE transactions ADD COLUMN {col_name} {col_def}")
+                # Backfill: rows written before model_prediction existed only
+                # kept the model's binary verdict inside is_fraud - but resolve
+                # overwrites is_fraud with the human verdict, so the original
+                # prediction is reconstructed from fraud_probability (never
+                # touched by a human decision; >0.5 matches pipeline.predict
+                # argmax semantics). NULL-model_probability rows fall back to
+                # is_fraud (still model-owned if the row was never resolved).
+                # WHERE model_prediction IS NULL makes the whole step idempotent.
+                conn.execute("""
+                    UPDATE transactions
+                    SET model_prediction = CASE
+                        WHEN fraud_probability IS NOT NULL
+                          THEN (CASE WHEN fraud_probability > 0.5 THEN 1 ELSE 0 END)
+                        ELSE is_fraud
+                    END
+                    WHERE model_prediction IS NULL
+                """)
                 conn.commit()
             self.upsert_setting("schema_version", SCHEMA_VERSION)
 
@@ -414,12 +435,13 @@ class TransactionRepository:
             conn.execute("""
                 INSERT INTO transactions
                 (transaction_id, user_id, amount, transaction_type, timestamp, beneficiary_id, device_id,
-                 location_latitude, location_longitude, is_fraud, fraud_probability, risk_score, risk_level,
-                 triggered_rules, created_at, payment_method, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 location_latitude, location_longitude, is_fraud, model_prediction, fraud_probability,
+                 risk_score, risk_level, triggered_rules, created_at, payment_method, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 txn_id, user_id, amount, txn_type, timestamp, beneficiary_id, device_id,
-                latitude, longitude, is_fraud, prob, score, level, rules_str, created_at, payment_method, status
+                latitude, longitude, is_fraud, is_fraud, prob, score, level, rules_str,
+                created_at, payment_method, status
             ))
 
             # Update user profile dynamically
@@ -893,6 +915,61 @@ class TransactionRepository:
             "ids": resolved_ids,
         }
 
+    def get_feedback_confusion_matrix(self, days: int = 30) -> dict:
+        """Live confusion matrix built from HUMAN verdicts, not the frozen
+        training holdout.
+
+        Ground truth = the analyst/admin decision: resolve writes
+        is_fraud=1 for BLOCKED and 0 for APPROVED (human judgement).
+        Prediction  = model_prediction, snapshotted at write time and never
+        touched by a decision.
+
+        Only human-resolved rows count: unresolved rows have no ground truth
+        yet, and system:policy auto-resolves are machine decisions, not
+        customer feedback. One FILTER-aggregate pass over the resolved
+        subset; resolved_at rides the ISO-text comparison the same way
+        created_at windows do elsewhere."""
+        window_start = (datetime.now() - timedelta(days=days)).isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE model_prediction = 1 AND is_fraud = 1) AS tp,
+                    COUNT(*) FILTER (WHERE model_prediction = 1 AND is_fraud = 0) AS fp,
+                    COUNT(*) FILTER (WHERE model_prediction = 0 AND is_fraud = 0) AS tn,
+                    COUNT(*) FILTER (WHERE model_prediction = 0 AND is_fraud = 1) AS fn,
+                    COUNT(*) FILTER (WHERE claimed_by IS NOT NULL) AS analyst_flagged
+                FROM transactions
+                WHERE model_prediction IS NOT NULL
+                  AND is_fraud IS NOT NULL
+                  AND resolved_by IS NOT NULL
+                  AND resolved_by <> 'system:policy'
+                  AND resolved_at >= ?
+            """, (window_start,))
+            row = cursor.fetchone()
+
+        total = row["total"] or 0
+        tp, fp, tn, fn = row["tp"] or 0, row["fp"] or 0, row["tn"] or 0, row["fn"] or 0
+
+        def _safe(num: float, den: float) -> float:
+            return (num / den) if den else 0.0
+
+        precision = _safe(tp, tp + fp)
+        recall = _safe(tp, tp + fn)
+        return {
+            "days": days,
+            "total": total,
+            "tp": tp,
+            "fp": fp,
+            "tn": tn,
+            "fn": fn,
+            "analyst_flagged": row["analyst_flagged"] or 0,
+            "accuracy": _safe(tp + tn, total),
+            "precision": precision,
+            "recall": recall,
+            "f1": (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0,
+        }
+
     def purge_internal_transactions(self) -> int:
         """Delete the demo-support rows older scenario generators persisted
         into the ledger (txn_hist_* history seeds + txn_velocity_* jump seeds).
@@ -1012,11 +1089,17 @@ class TransactionRepository:
             # One scan, not six: COUNT with FILTER aggregates every metric in a
             # single pass over the table (index-assisted on the risk/status
             # columns where relevant).
+            #
+            # Fraud counts read model_prediction (the model's verdict at write
+            # time), NOT bare is_fraud: resolve/auto-resolve overwrite is_fraud
+            # with the human/system decision, which used to make these counts a
+            # moving mix of model output and analyst verdicts. COALESCE keeps
+            # pre-v4 rows (no model_prediction yet) behaving as before.
             cursor_summary = conn.execute("""
                 SELECT
                     COUNT(*) AS total,
-                    COUNT(*) FILTER (WHERE is_fraud = 1) AS fraud,
-                    COUNT(*) FILTER (WHERE is_fraud = 0) AS genuine,
+                    COUNT(*) FILTER (WHERE COALESCE(model_prediction, is_fraud) = 1) AS fraud,
+                    COUNT(*) FILTER (WHERE COALESCE(model_prediction, is_fraud) = 0) AS genuine,
                     COUNT(*) FILTER (WHERE risk_score >= 70) AS high_risk
                 FROM transactions
             """)
@@ -1033,7 +1116,7 @@ class TransactionRepository:
             cursor_trend = conn.execute("""
                 SELECT to_char(created_at::timestamp, 'HH24') as hour,
                        COUNT(*) as count,
-                       COALESCE(SUM(is_fraud), 0) as fraud_count
+                       COALESCE(SUM(COALESCE(model_prediction, is_fraud)), 0) as fraud_count
                 FROM transactions
                 WHERE created_at >= ?
                 GROUP BY hour
