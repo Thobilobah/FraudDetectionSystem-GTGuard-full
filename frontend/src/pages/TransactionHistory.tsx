@@ -49,18 +49,39 @@ export const TransactionHistory: React.FC = () => {
   };
 
   const handleDownload = async () => {
-    if (!fromDate || !toDate) {
-      showToast("danger", "Pick a date range", "Choose both a From and To date before downloading.");
+    // Dates are optional (empty = no date limit), but half a range is a typo.
+    if ((fromDate && !toDate) || (!fromDate && toDate)) {
+      showToast("danger", "Incomplete date range", "Pick both a From and To date, or clear both to export all dates.");
       return;
     }
-    if (toDate < fromDate) {
+    if (fromDate && toDate && toDate < fromDate) {
       showToast("danger", "Invalid date range", "The To date can't be before the From date.");
       return;
     }
     setIsExporting(true);
     try {
-      await exportTransactionsCsv(fromDate, toDate);
-      showToast("success", "Report downloaded", `Transactions from ${fromDate} to ${toDate} saved as CSV.`);
+      // The export mirrors exactly what the table is showing: every active
+      // toolbar filter plus the (optional) dates from this card.
+      const params = {
+        startDate: fromDate || undefined,
+        endDate: toDate || undefined,
+        search: searchTerm.trim() || undefined,
+        riskLevel: riskFilter === "ALL" ? undefined : riskFilter,
+        status: statusFilter === "ALL" ? undefined : statusFilter,
+        method: methodFilter === "ALL" ? undefined : methodFilter,
+        location: locationFilter === "ALL" ? undefined : locationFilter,
+      };
+      await exportTransactionsCsv(params);
+
+      const active: string[] = [];
+      if (searchTerm.trim()) active.push(`search "${searchTerm.trim()}"`);
+      if (riskFilter !== "ALL") active.push(`${riskFilter} risk`);
+      if (statusFilter !== "ALL") active.push(statusFilter);
+      if (methodFilter !== "ALL") active.push(methodFilter);
+      if (locationFilter !== "ALL") active.push(locationFilter);
+      const scopeFilters = active.length ? active.join(", ") : "no filters";
+      const scopeDates = fromDate && toDate ? `${fromDate} to ${toDate}` : "all dates";
+      showToast("success", "Report downloaded", `${scopeFilters} · ${scopeDates}`);
     } catch (e) {
       console.error("Failed to export transactions:", e);
       showToast("danger", "Download failed", "Could not generate the report. Please try again.");
@@ -202,6 +223,9 @@ export const TransactionHistory: React.FC = () => {
               {isExporting ? "Generating..." : "Download Report (CSV)"}
             </button>
           </div>
+          <p className="text-xs text-white/85 font-medium">
+            Exports exactly what the table below shows — the risk, status, method, location and search filters all apply. From/To are optional: clear both for all dates.
+          </p>
         </div>
       )}
 

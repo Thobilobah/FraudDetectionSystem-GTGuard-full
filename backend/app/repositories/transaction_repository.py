@@ -1080,22 +1080,39 @@ class TransactionRepository:
                 "profiles_updated": len(outside_profiles),
             }
 
-    def stream_transactions_in_range(self, start_date: str, end_date: str):
+    def stream_transactions(self, start_date: str = "", end_date: str = "",
+                            search: str = "", risk_level: str = "",
+                            status: str = "", payment_method: str = "",
+                            location: str = ""):
         """Server-side named cursor for the admin CSV export. Rows are
         streamed from Postgres in batches (itersize) and yielded one at a time
-        instead of materializing the entire date range in memory. The pooled
+        instead of materializing the full result set in memory. The pooled
         connection is always returned to the pool, even if the consumer stops
-        iterating early."""
+        iterating early.
+
+        Scope = the same toolbar filters the Transaction History page uses
+        (via _build_filters) plus an OPTIONAL date range: either both dates or
+        neither - an empty date means no date restriction, so the export can
+        cover all of matching history."""
+        where_sql, params = self._build_filters(search, risk_level, status, "",
+                                                 payment_method, location)
+        date_extras = []
+        if start_date:
+            date_extras.append("created_at::date >= %s::date")
+            params.append(start_date)
+        if end_date:
+            date_extras.append("created_at::date <= %s::date")
+            params.append(end_date)
+        if date_extras:
+            where_sql = (where_sql + " AND " if where_sql else " WHERE ") + " AND ".join(date_extras)
         raw_conn = self._pool.getconn()
         try:
             cursor = raw_conn.cursor(name="export_stream", cursor_factory=psycopg2.extras.RealDictCursor)
             cursor.itersize = 500
-            cursor.execute("""
-                SELECT * FROM transactions
-                WHERE created_at::date >= %s::date
-                  AND created_at::date <= %s::date
-                ORDER BY created_at DESC
-            """, (start_date, end_date))
+            cursor.execute(
+                ("SELECT * FROM transactions" + where_sql + " ORDER BY created_at DESC").replace("?", "%s"),
+                tuple(params),
+            )
             for row in cursor:
                 yield dict(row)
         finally:
@@ -1103,7 +1120,7 @@ class TransactionRepository:
 
     def get_transactions_in_range(self, start_date: str, end_date: str) -> list:
         """Used by the admin CSV report export (small ranges) and retained for
-        compatibility; large exports should use stream_transactions_in_range
+        compatibility; large exports should use stream_transactions
         instead, which does not load the full range into memory."""
         with self.get_connection() as conn:
             cursor = conn.execute("""

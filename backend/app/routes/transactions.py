@@ -8,6 +8,7 @@ from backend.app.auth import require_admin, get_current_user
 import json
 import csv
 import io
+import re
 import time
 from datetime import date
 
@@ -105,24 +106,48 @@ def get_feedback_confusion_matrix(
 
 @router.get("/transactions/export")
 def export_transactions_csv(
-    start_date: str = Query(..., description="ISO date, e.g. 2026-09-01"),
-    end_date: str = Query(..., description="ISO date, e.g. 2026-09-18"),
+    start_date: str | None = Query(None, description="ISO date (YYYY-MM-DD), optional - empty = no date limit"),
+    end_date: str | None = Query(None, description="ISO date (YYYY-MM-DD), optional - empty = no date limit"),
+    search: str = Query("", description="Same search as the ledger: transaction_id, user_id or beneficiary_id"),
+    risk_level: str = Query("", description="LOW | MEDIUM | HIGH (empty = all)"),
+    status: str = Query("", description="APPROVED | PENDING | SUSPENDED | BLOCKED (empty = all)"),
+    payment_method: str = Query("", description="USSD | Debit Card | Net Banking | Mobile Transfer | Wallet (empty = all)"),
+    location: str = Query("", description="Nigerian state name, matched on nearest city (empty = all)"),
     current_user: dict = Depends(require_admin)
 ):
-    """Admin-only: download a CSV report of every transaction in the given
-    date range, including who claimed/reviewed and who ultimately resolved
-    each one - so an admin can see exactly which analyst worked on what."""
-    try:
-        # Validate the date range before opening the server-side cursor
-        date.fromisoformat(start_date)
-        date.fromisoformat(end_date)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="start_date and end_date must be ISO dates (YYYY-MM-DD).")
+    """Admin-only: download a CSV report of what the Transaction History page
+    is currently showing - every active toolbar filter (search, risk, status,
+    method, location) PLUS an optional From/To date range. Leave the dates
+    empty to export all of matching history. Each row includes who
+    claimed/reviewed it and who ultimately resolved it."""
+    start_date = (start_date or "").strip()
+    end_date = (end_date or "").strip()
+    if bool(start_date) != bool(end_date):
+        raise HTTPException(status_code=400, detail="Provide both From and To dates, or clear both for no date limit.")
+    if start_date and end_date:
+        try:
+            date.fromisoformat(start_date)
+            date.fromisoformat(end_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="start_date and end_date must be ISO dates (YYYY-MM-DD).")
+        if end_date < start_date:
+            raise HTTPException(status_code=400, detail="end_date must not be before start_date.")
 
-    if end_date < start_date:
-        raise HTTPException(status_code=400, detail="end_date must not be before start_date.")
+    # Filename mirrors the scope: dates (or all-dates) + the active filters.
+    def _slug(value: str) -> str:
+        return re.sub(r"[^A-Za-z0-9.-]+", "-", value).strip("-")[:30]
 
-    filename = f"gt-guard-transactions_{start_date}_to_{end_date}.csv"
+    scope = []
+    if start_date and end_date:
+        scope.append(f"{start_date}_to_{end_date}")
+    else:
+        scope.append("all-dates")
+    for label, value in (("q", search), ("risk", risk_level), ("status", status),
+                         ("method", payment_method), ("location", location)):
+        value = value.strip()
+        if value:
+            scope.append(f"{label}-{_slug(value)}")
+    filename = f"gt-guard-transactions_{'_'.join(scope)}.csv"
     header = [
         "Timestamp", "Transaction ID", "User Account", "Beneficiary", "Method",
         "Amount (NGN)", "Risk Score", "Risk Level", "Decision",
@@ -139,7 +164,12 @@ def export_transactions_csv(
         # batches - the full date range never materializes in memory here.
         yield _csv_line(header)
         try:
-            txns_iter = db_repo.stream_transactions_in_range(start_date, end_date)
+            txns_iter = db_repo.stream_transactions(
+                start_date, end_date,
+                search=search.strip(), risk_level=risk_level.strip(),
+                status=status.strip(), payment_method=payment_method.strip(),
+                location=location.strip(),
+            )
             for t in txns_iter:
                 yield _csv_line([
                     t.get("created_at") or t.get("timestamp") or "",

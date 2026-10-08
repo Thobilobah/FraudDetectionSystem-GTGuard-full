@@ -276,14 +276,56 @@ export const getFeedbackConfusionMatrix = async (
   return response.data;
 };
 
+export interface ExportTransactionsParams {
+  /** Optional ISO dates - omit both for no date limit. */
+  startDate?: string;
+  endDate?: string;
+  /** Active toolbar filters; omit any to export everything in scope. */
+  search?: string;
+  riskLevel?: string;
+  status?: string;
+  method?: string;
+  location?: string;
+}
+
+const exportSlug = (value: string): string =>
+  value.replace(/[^A-Za-z0-9.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
+
+/** Filename mirrors the backend's: scope = dates + active filters. */
+export const buildExportFilename = (p: ExportTransactionsParams): string => {
+  const scope: string[] = [p.startDate && p.endDate ? `${p.startDate}_to_${p.endDate}` : "all-dates"];
+  const parts: Array<[string, string | undefined]> = [
+    ["q", p.search],
+    ["risk", p.riskLevel],
+    ["status", p.status],
+    ["method", p.method],
+    ["location", p.location],
+  ];
+  for (const [label, value] of parts) {
+    if (value) scope.push(`${label}-${exportSlug(value)}`);
+  }
+  return `gt-guard-transactions_${scope.join("_")}.csv`;
+};
+
 /**
- * Admin-only: downloads a CSV report for the given date range and triggers
- * a browser save-as, so an admin can see who claimed/resolved every
- * transaction without needing to open the dashboard.
+ * Admin-only: downloads a CSV of exactly what the Transaction History page
+ * shows - all active toolbar filters plus an OPTIONAL From/To date range
+ * (omit both dates for all of matching history) - and triggers a browser
+ * save-as, so an admin can see who claimed/resolved every selected row
+ * without needing to open the dashboard.
  */
-export const exportTransactionsCsv = async (startDate: string, endDate: string): Promise<void> => {
+export const exportTransactionsCsv = async (params: ExportTransactionsParams): Promise<void> => {
+  const query: Record<string, string> = {};
+  if (params.startDate) query.start_date = params.startDate;
+  if (params.endDate) query.end_date = params.endDate;
+  if (params.search) query.search = params.search;
+  if (params.riskLevel) query.risk_level = params.riskLevel;
+  if (params.status) query.status = params.status;
+  if (params.method) query.payment_method = params.method;
+  if (params.location) query.location = params.location;
+
   const response = await api.get("/transactions/export", {
-    params: { start_date: startDate, end_date: endDate },
+    params: query,
     responseType: "blob",
   });
 
@@ -291,7 +333,7 @@ export const exportTransactionsCsv = async (startDate: string, endDate: string):
   const url = window.URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `gt-guard-transactions_${startDate}_to_${endDate}.csv`;
+  link.download = buildExportFilename(params);
   document.body.appendChild(link);
   link.click();
   link.remove();
