@@ -636,6 +636,16 @@ export const ReviewQueue: React.FC = () => {
                           AUTO
                         </span>
                       )}
+                      {row.resolved_by === "system:auth-timeout" && (
+                        <span className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded border border-brand-warning/40 bg-brand-warning/10 text-brand-warning">
+                          AUTH TIMEOUT
+                        </span>
+                      )}
+                      {row.resolved_by === "customer:auth" && (
+                        <span className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded border border-brand-success/40 bg-brand-success/10 text-brand-success">
+                          CUSTOMER AUTH
+                        </span>
+                      )}
                       {row.resolved_at && <span className="text-[10px] text-dark-muted block">{fmtTime(row.resolved_at)}</span>}
                     </td>
                   </tr>

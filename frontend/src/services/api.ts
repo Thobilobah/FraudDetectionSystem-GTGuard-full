@@ -165,6 +165,16 @@ export const suspendTransaction = async (transactionId: string): Promise<Transac
 };
 
 /**
+ * Simulate the customer clearing an "awaiting user authentication" hold on a
+ * MEDIUM 40-45 transaction (OTP/biometric in production) -> APPROVED. Without
+ * it the auth-timeout sweep blocks the transaction after 15 minutes.
+ */
+export const authenticateTransaction = async (transactionId: string): Promise<Transaction> => {
+  const response = await api.post(`/transactions/${transactionId}/authenticate`);
+  return response.data;
+};
+
+/**
  * Fetch a single transaction with fresh stamps (claimed/resolved) and parsed
  * rules - used when opening the Review Queue detail modal so the analysis
  * always reflects the latest state, not a stale table row.
@@ -216,8 +226,9 @@ export const getQueueMetrics = async (): Promise<QueueMetrics> => {
 };
 
 /**
- * Trigger the conservative auto-resolve policy sweep. The server throttles
- * itself to one real sweep per minute, so polling this is cheap.
+ * Trigger the auth-timeout sweep. Unauthenticated MEDIUM 40-45 holds past
+ * their 15-minute lifespan are BLOCKED. The server throttles itself to one
+ * real sweep per minute, so polling this is cheap.
  */
 export const runAutoResolve = async (): Promise<{ skipped?: boolean; resolved?: number }> => {
   const response = await api.post("/transactions/auto-resolve-run");
@@ -264,8 +275,9 @@ export interface FeedbackConfusionMatrix {
  * Live confusion matrix from human decisions (admin): analyst resolve
  * verdicts as ground truth vs the model_prediction snapshot, over ALL
  * transaction history by default (omit `days` for full history, or pass
- * a positive int for a rolling window). Excludes system:policy
- * auto-resolves - only human feedback counts.
+ * a positive int for a rolling window). Excludes system decisions
+ * (system:policy, system:auth-timeout) and customer:auth - only human
+ * feedback counts.
  */
 export const getFeedbackConfusionMatrix = async (
   days?: number

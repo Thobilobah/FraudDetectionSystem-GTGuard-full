@@ -27,6 +27,7 @@ export interface Transaction {
   resolved_at?: string | null;
   claimed_by?: string | null;
   claimed_at?: string | null;
+  required_action?: "USER_AUTH" | null;
 }
 
 export interface TransactionPage {

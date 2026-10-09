@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import type { Transaction } from "../types";
-import { resolveTransaction, suspendTransaction, bulkSuspendTransactions, getStoredUser, getTransactionsPage } from "../services/api";
-import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { resolveTransaction, suspendTransaction, bulkSuspendTransactions, authenticateTransaction, getStoredUser, getTransactionsPage } from "../services/api";
+import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search, Fingerprint, Clock } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
 import { formatPlace, isInNigeria } from "../utils/nigeriaPlaces";
@@ -18,6 +18,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [claimingId, setClaimingId] = useState<string | null>(null);
+  const [authingId, setAuthingId] = useState<string | null>(null);
   const [claimError, setClaimError] = useState<string | null>(null);
   // Server-side pagination of the ledger, mirroring TransactionHistory. The
   // monitor no longer renders the shared 100-row poll cache; it fetches only
@@ -102,7 +103,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
     setSelectedIds((prev) => {
       if (prev.size === 0) return prev;
       const pendingNow = new Set(
-        rows.filter((r) => r.status === "PENDING").map((r) => r.transaction_id)
+        rows.filter((r) => r.status === "PENDING" && r.required_action !== "USER_AUTH").map((r) => r.transaction_id)
       );
       const next = new Set([...prev].filter((id) => pendingNow.has(id)));
       return next.size === prev.size ? prev : next;
@@ -120,7 +121,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   };
 
   const toggleSelectAllPending = () => {
-    const pendingOnPage = rows.filter((r) => r.status === "PENDING").map((r) => r.transaction_id);
+    const pendingOnPage = rows.filter((r) => r.status === "PENDING" && r.required_action !== "USER_AUTH").map((r) => r.transaction_id);
     const allSelected = pendingOnPage.length > 0 && pendingOnPage.every((id) => selectedIds.has(id));
     setSelectedIds(allSelected ? new Set() : new Set(pendingOnPage));
     setBulkConfirm(false);
@@ -207,6 +208,26 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
     }
   };
 
+  const handleAuthenticate = async (txnId: string) => {
+    setAuthingId(txnId);
+    try {
+      const updated = await authenticateTransaction(txnId);
+      if (selectedTxn?.transaction_id === txnId) {
+        setSelectedTxn({ ...selectedTxn, ...updated });
+      }
+      showToast("success", "Customer authenticated", `${txnId} cleared the authentication hold and is now APPROVED.`);
+      await reloadCurrentPage();
+      void onRefresh();
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      showToast("danger", "Authentication failed", typeof detail === "string" ? detail : "Could not authenticate this transaction. Please try again.");
+      await reloadCurrentPage();
+      void onRefresh();
+    } finally {
+      setAuthingId(null);
+    }
+  };
+
   const getRiskBadge = (level: string | null) => {
     switch (level) {
       case "LOW":
@@ -220,7 +241,19 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
     }
   };
 
-  const getStatusDisplay = (status: string | null | undefined) => {
+  // A MEDIUM hold in the 40-45 band: status stays PENDING but the ball is in
+  // the customer's court (OTP / biometric) - not analyst work.
+  const isAuthHold = (txn: Transaction) =>
+    txn.status === "PENDING" && txn.required_action === "USER_AUTH";
+
+  const getStatusDisplay = (status: string | null | undefined, requiredAction?: string | null) => {
+    if (status === "PENDING" && requiredAction === "USER_AUTH") {
+      return (
+        <div className="flex items-center gap-1 text-brand-warning font-semibold text-xs" title="Awaiting the customer's authentication - auto-blocks in 15 min if unanswered">
+          <Fingerprint className="h-4 w-4" /> Awaiting User Auth
+        </div>
+      );
+    }
     if (status === "PENDING") {
       return (
         <div className="flex items-center gap-1 text-brand-info font-semibold text-xs">
@@ -298,6 +331,16 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
       </div>
     );
 
+    if (isAuthHold(txn)) {
+      // Customer-auth hold: not analyst work. Admins may still override.
+      if (isAdmin) return resolveButtons;
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-md bg-brand-warning/10 text-brand-warning border border-brand-warning/30 whitespace-nowrap">
+          <Fingerprint className="h-3 w-3" /> Awaiting user auth
+        </span>
+      );
+    }
+
     if (txn.status === "PENDING") {
       if (isAdmin) return resolveButtons;
       return (
@@ -360,7 +403,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
         <div className="bg-dark-card border border-dark-border rounded-xl shadow-glow-brand overflow-hidden lg:col-span-2">
           <div className="px-5 py-3.5 border-b border-dark-border flex items-center justify-between gap-3 flex-wrap lg:flex-nowrap">
             <div className="flex items-center gap-3 shrink-0">
-              <h3 className="text-base font-semibold text-dark-text font-mono whitespace-nowrap">Surveillance Stream</h3>
+              <h3 className="text-base font-semibold text-dark-text whitespace-nowrap">Surveillance Stream</h3>
               <span className="text-[10px] bg-guard-orangeLight text-guard-orange font-bold px-2 py-0.5 rounded-full uppercase tracking-wider whitespace-nowrap">
                 {total.toLocaleString()} Total
               </span>
@@ -462,8 +505,8 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                           type="checkbox"
                           aria-label="Select all pending rows on this page"
                           checked={
-                            rows.filter((r) => r.status === "PENDING").length > 0 &&
-                            rows.filter((r) => r.status === "PENDING").every((r) => selectedIds.has(r.transaction_id))
+                            rows.filter((r) => r.status === "PENDING" && r.required_action !== "USER_AUTH").length > 0 &&
+                            rows.filter((r) => r.status === "PENDING" && r.required_action !== "USER_AUTH").every((r) => selectedIds.has(r.transaction_id))
                           }
                           onChange={toggleSelectAllPending}
                           className="accent-guard-orange align-middle"
@@ -496,11 +539,11 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                         isLoading ? "opacity-50" : ""
                       } ${
                         selectedTxn?.transaction_id === txn.transaction_id ? "bg-guard-orangeLight/40 border-l-4 border-l-guard-orange" : ""
-                      } ${txn.status === "SUSPENDED" ? "bg-guard-orangeLight/60" : ""} ${txn.status === "PENDING" ? "bg-brand-info/5" : ""}`}
+                      } ${txn.status === "SUSPENDED" ? "bg-guard-orangeLight/60" : ""} ${isAuthHold(txn) ? "bg-brand-warning/5" : txn.status === "PENDING" ? "bg-brand-info/5" : ""}`}
                     >
                       {!isAdmin && (
                         <td className="px-3 py-3.5" onClick={(e) => e.stopPropagation()}>
-                          {txn.status === "PENDING" ? (
+                          {txn.status === "PENDING" && txn.required_action !== "USER_AUTH" ? (
                             <input
                               type="checkbox"
                               aria-label={`Select ${txn.transaction_id}`}
@@ -511,7 +554,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                           ) : null}
                         </td>
                       )}
-                      <td className="px-3 py-3.5 font-mono text-xs font-semibold text-dark-text">
+                      <td className="px-3 py-3.5 text-xs font-semibold text-dark-text">
                         {txn.transaction_id}
                       </td>
                       <td className="px-3 py-3.5 text-dark-text font-medium">{txn.user_id}</td>
@@ -526,7 +569,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                         {getActionCell(txn)}
                       </td>
                       <td className="px-3 py-3.5">
-                        {getStatusDisplay(txn.status)}
+                        {getStatusDisplay(txn.status, txn.required_action)}
                       </td>
                       <td className="px-3 py-3.5 text-right text-xs text-dark-muted">
                         {parseApiTimestamp(txn.timestamp).toLocaleTimeString()}
@@ -584,7 +627,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                 >
                   <ChevronLeft className="h-3.5 w-3.5" /> Prev
                 </button>
-                <span className="text-xs text-dark-muted font-mono font-semibold whitespace-nowrap">
+                <span className="text-xs text-dark-muted font-semibold whitespace-nowrap">
                   Page {page + 1} / {Math.max(1, Math.ceil(total / pageSize))}
                 </span>
                 <button
@@ -607,11 +650,15 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
               <div className="border-b border-dark-border pb-4 flex items-center justify-between">
                 <div>
                   <span className="text-[10px] text-guard-orange font-bold uppercase tracking-wider block">Detailed Analysis</span>
-                  <h3 className="text-base font-mono font-bold text-dark-text">{selectedTxn.transaction_id}</h3>
+                  <h3 className="text-base font-bold text-dark-text">{selectedTxn.transaction_id}</h3>
                 </div>
                 {selectedTxn.status === "SUSPENDED" ? (
                   <span className="bg-guard-orangeLight text-guard-orange border border-guard-orange/30 rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
                     <PauseCircle className="h-3.5 w-3.5" /> SUSPENDED
+                  </span>
+                ) : isAuthHold(selectedTxn) ? (
+                  <span className="bg-brand-warning/10 text-brand-warning border border-brand-warning/30 rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
+                    <Fingerprint className="h-3.5 w-3.5" /> AWAITING USER AUTH
                   </span>
                 ) : selectedTxn.status === "PENDING" ? (
                   <span className="bg-brand-info/10 text-brand-info border border-brand-info/30 rounded px-2.5 py-1 text-xs font-bold flex items-center gap-1">
@@ -628,46 +675,86 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                 )}
               </div>
 
-              {/* Suspended/Pending: admin resolve panel, or analyst suspend action */}
+              {/* Suspended/Pending: admin resolve panel, analyst suspend action,
+                  or the customer-auth hold (MEDIUM 40-45) */}
               {(selectedTxn.status === "SUSPENDED" || selectedTxn.status === "PENDING") && (
-                <div className="bg-guard-orangeLight border border-guard-orange/30 rounded-lg p-4 space-y-3">
-                  <p className="text-xs text-guard-orange font-semibold leading-relaxed">
-                    {selectedTxn.status === "PENDING"
-                      ? "This transaction is medium risk and awaiting action. An analyst can flag it for review, or an admin can resolve it directly."
-                      : "This transaction is held pending review. Funds will not move until an admin approves or blocks it."}
-                  </p>
-                  {isAdmin ? (
-                    <div className="flex gap-2">
-                      <button
-                        disabled={resolvingId === selectedTxn.transaction_id}
-                        onClick={() => handleResolve(selectedTxn.transaction_id, "APPROVED")}
-                        className="flex-1 bg-brand-success text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-success/90 transition disabled:opacity-50"
-                      >
-                        Approve Transaction
-                      </button>
-                      <button
-                        disabled={resolvingId === selectedTxn.transaction_id}
-                        onClick={() => handleResolve(selectedTxn.transaction_id, "BLOCKED")}
-                        className="flex-1 bg-brand-danger text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-danger/90 transition disabled:opacity-50"
-                      >
-                        Block Transaction
-                      </button>
-                    </div>
-                  ) : selectedTxn.status === "PENDING" ? (
-                    <button
-                      disabled={claimingId === selectedTxn.transaction_id}
-                      onClick={() => handleSuspend(selectedTxn.transaction_id)}
-                      className="w-full bg-guard-orange text-white text-xs font-bold py-2 rounded-lg hover:bg-guard-orange/90 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
-                    >
-                      {claimingId === selectedTxn.transaction_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PauseCircle className="h-3.5 w-3.5" />}
-                      {claimingId === selectedTxn.transaction_id ? "Suspending..." : "Suspend Transaction"}
-                    </button>
-                  ) : (
-                    <p className="text-[11px] text-guard-orange/80 font-medium italic">
-                      Only an admin account can resolve this. Sign in with an admin email to take action.
+                isAuthHold(selectedTxn) ? (
+                  <div className="bg-brand-warning/10 border border-brand-warning/30 rounded-lg p-4 space-y-3">
+                    <p className="text-xs text-brand-warning font-semibold leading-relaxed flex items-start gap-1.5">
+                      <Clock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                      <span>
+                        This medium-risk transaction (40-45%) is awaiting the customer's
+                        authentication (OTP / biometric). Analysts cannot flag it. If it is not
+                        authenticated within 15 minutes, the system blocks it automatically.
+                      </span>
                     </p>
-                  )}
-                </div>
+                    <button
+                      disabled={authingId === selectedTxn.transaction_id}
+                      onClick={() => handleAuthenticate(selectedTxn.transaction_id)}
+                      className="w-full bg-brand-warning text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-warning/90 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                    >
+                      {authingId === selectedTxn.transaction_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Fingerprint className="h-3.5 w-3.5" />}
+                      {authingId === selectedTxn.transaction_id ? "Authenticating..." : "Simulate Customer Authentication"}
+                    </button>
+                    {isAdmin && (
+                      <div className="flex gap-2 pt-1 border-t border-brand-warning/20">
+                        <button
+                          disabled={resolvingId === selectedTxn.transaction_id}
+                          onClick={() => handleResolve(selectedTxn.transaction_id, "APPROVED")}
+                          className="flex-1 bg-brand-success text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-success/90 transition disabled:opacity-50"
+                        >
+                          Approve (override)
+                        </button>
+                        <button
+                          disabled={resolvingId === selectedTxn.transaction_id}
+                          onClick={() => handleResolve(selectedTxn.transaction_id, "BLOCKED")}
+                          className="flex-1 bg-brand-danger text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-danger/90 transition disabled:opacity-50"
+                        >
+                          Block (override)
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="bg-guard-orangeLight border border-guard-orange/30 rounded-lg p-4 space-y-3">
+                    <p className="text-xs text-guard-orange font-semibold leading-relaxed">
+                      {selectedTxn.status === "PENDING"
+                        ? "This transaction is medium risk and awaiting action. An analyst can flag it for review, or an admin can resolve it directly."
+                        : "This transaction is held pending review. Funds will not move until an admin approves or blocks it."}
+                    </p>
+                    {isAdmin ? (
+                      <div className="flex gap-2">
+                        <button
+                          disabled={resolvingId === selectedTxn.transaction_id}
+                          onClick={() => handleResolve(selectedTxn.transaction_id, "APPROVED")}
+                          className="flex-1 bg-brand-success text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-success/90 transition disabled:opacity-50"
+                        >
+                          Approve Transaction
+                        </button>
+                        <button
+                          disabled={resolvingId === selectedTxn.transaction_id}
+                          onClick={() => handleResolve(selectedTxn.transaction_id, "BLOCKED")}
+                          className="flex-1 bg-brand-danger text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-danger/90 transition disabled:opacity-50"
+                        >
+                          Block Transaction
+                        </button>
+                      </div>
+                    ) : selectedTxn.status === "PENDING" ? (
+                      <button
+                        disabled={claimingId === selectedTxn.transaction_id}
+                        onClick={() => handleSuspend(selectedTxn.transaction_id)}
+                        className="w-full bg-guard-orange text-white text-xs font-bold py-2 rounded-lg hover:bg-guard-orange/90 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                      >
+                        {claimingId === selectedTxn.transaction_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PauseCircle className="h-3.5 w-3.5" />}
+                        {claimingId === selectedTxn.transaction_id ? "Suspending..." : "Suspend Transaction"}
+                      </button>
+                    ) : (
+                      <p className="text-[11px] text-guard-orange/80 font-medium italic">
+                        Only an admin account can resolve this. Sign in with an admin email to take action.
+                      </p>
+                    )}
+                  </div>
+                )
               )}
 
               {selectedTxn.claimed_by && (
@@ -711,7 +798,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                   <UserCheck className="h-4.5 w-4.5 text-guard-orange shrink-0 mt-0.5" />
                   <div>
                     <span className="text-dark-muted block font-semibold">User Account</span>
-                    <span className="text-dark-text font-mono">{selectedTxn.user_id}</span>
+                    <span className="text-dark-text">{selectedTxn.user_id}</span>
                   </div>
                 </div>
                 
@@ -719,7 +806,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                   <Shield className="h-4.5 w-4.5 text-guard-orange shrink-0 mt-0.5" />
                   <div>
                     <span className="text-dark-muted block font-semibold">Beneficiary Account Address</span>
-                    <span className="text-dark-text font-mono">{selectedTxn.beneficiary_id}</span>
+                    <span className="text-dark-text">{selectedTxn.beneficiary_id}</span>
                   </div>
                 </div>
 
@@ -737,7 +824,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                   <Tablet className="h-4.5 w-4.5 text-guard-orange shrink-0 mt-0.5" />
                   <div>
                     <span className="text-dark-muted block font-semibold">Device fingerprint</span>
-                    <span className="text-dark-text font-mono truncate max-w-[200px] block">{selectedTxn.device_id}</span>
+                    <span className="text-dark-text truncate max-w-[200px] block">{selectedTxn.device_id}</span>
                   </div>
                 </div>
 
@@ -745,7 +832,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                   <MapPin className="h-4.5 w-4.5 text-guard-orange shrink-0 mt-0.5" />
                   <div>
                     <span className="text-dark-muted block font-semibold">Geo location coordinates</span>
-                    <span className="text-dark-text font-mono text-xs">
+                    <span className="text-dark-text text-xs">
                       {selectedTxn.location_latitude.toFixed(4)}, {selectedTxn.location_longitude.toFixed(4)}
                     </span>
                     <span className={`block text-xs font-semibold ${isInNigeria(selectedTxn.location_latitude, selectedTxn.location_longitude) ? "text-guard-orange" : "text-red-400"}`}>

@@ -97,8 +97,9 @@ def get_feedback_confusion_matrix(
     APPROVED=genuine) as ground truth and the model_prediction snapshot as
     the classifier output, over ALL human-resolved transaction history.
     Omit `days` for full history, or pass a positive int for a rolling
-    window. system:policy auto-resolves are excluded - they are machine
-    decisions, not customer feedback."""
+    window. Automated decisions (system:policy, system:auth-timeout) and
+    customer authentications (customer:auth) are excluded - only human
+    analyst/admin verdicts count as ground truth."""
     try:
         return db_repo.get_feedback_confusion_matrix(days)
     except Exception as e:
@@ -213,6 +214,11 @@ def suspend_transaction(
 
     if result.get("error") == "not_found":
         raise HTTPException(status_code=404, detail="Transaction not found.")
+    if result.get("error") == "auth_required":
+        raise HTTPException(
+            status_code=400,
+            detail="This transaction is awaiting customer authentication and cannot be flagged.",
+        )
     if result.get("error") == "not_pending":
         raise HTTPException(status_code=400, detail="Only a PENDING transaction can be suspended.")
 
@@ -254,6 +260,37 @@ def resolve_transaction(
             updated["triggered_rules"] = []
 
     return updated
+
+
+@router.post("/transactions/{txn_id}/authenticate")
+def authenticate_transaction(
+    txn_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Simulate the customer clearing a 'awaiting user authentication' hold
+    (MEDIUM 40-45): in production the customer confirms via OTP/biometric in
+    their banking app; here any signed-in operator can trigger it from the
+    dashboard. Only a PENDING USER_AUTH row can be cleared - it becomes
+    APPROVED. Without this, the timeout sweep blocks it after 15 minutes."""
+    try:
+        result = db_repo.authenticate_transaction(txn_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to authenticate transaction: {str(e)}")
+
+    if result.get("error") == "not_found":
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+    if result.get("error") == "not_pending":
+        raise HTTPException(status_code=400, detail="This transaction is no longer awaiting action.")
+    if result.get("error") == "not_auth":
+        raise HTTPException(status_code=400, detail="This transaction is not awaiting user authentication.")
+
+    if isinstance(result.get("triggered_rules"), str):
+        try:
+            result["triggered_rules"] = json.loads(result["triggered_rules"])
+        except Exception:
+            result["triggered_rules"] = []
+
+    return result
 
 
 @router.post("/transactions/bulk-suspend")
@@ -324,20 +361,21 @@ def get_queue_metrics(current_user: dict = Depends(require_admin)):
 
 @router.post("/transactions/auto-resolve-run")
 def run_auto_resolve(current_user: dict = Depends(get_current_user)):
-    """Policy sweep trigger - cheap enough for the dashboard's 10s poll: the
-    server only executes the sweep once per minute (throttled below), all
-    other calls return {'skipped': true} instantly. Conservative defaults:
-    unclaimed MEDIUM txns with score <= 45, untouched for 15 min, no CRITICAL
-    rules -> APPROVED as 'system:policy'. SUSPENDED rows are never touched."""
+    """Auth-timeout sweep trigger - cheap enough for the dashboard's 10s poll:
+    the server only executes the sweep once per minute (throttled below), all
+    other calls return {'skipped': true} instantly. Policy: an unauthenticated
+    USER_AUTH hold (MEDIUM 40-45) past its 15-minute lifespan is BLOCKED as
+    'system:auth-timeout'. The sweep never auto-approves, and SUSPENDED or
+    customer-authenticated rows are never touched."""
     global _LAST_AUTO_RESOLVE_RUN
     now = time.time()
     if now - _LAST_AUTO_RESOLVE_RUN < AUTO_RESOLVE_MIN_INTERVAL_S:
         return {"skipped": True, "resolved": 0}
     _LAST_AUTO_RESOLVE_RUN = now
     try:
-        return db_repo.run_auto_resolve_policy()
+        return db_repo.run_auth_timeout_sweep()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Auto-resolve sweep failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Auth-timeout sweep failed: {str(e)}")
 
 
 @router.get("/transactions/outcomes")

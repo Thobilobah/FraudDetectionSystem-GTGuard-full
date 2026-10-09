@@ -39,14 +39,20 @@ class Settings:
     RISK_THRESHOLD_LOW: int = int(os.getenv("RISK_THRESHOLD_LOW", "40"))
     RISK_THRESHOLD_HIGH: int = int(os.getenv("RISK_THRESHOLD_HIGH", "70"))
 
-    # Policy auto-resolution (conservative defaults): unclaimed PENDING
-    # transactions in the very bottom of the MEDIUM band (40-45) with no
-    # CRITICAL rule hits, untouched for 15 minutes, are approved by policy.
-    # Anything higher, older-flagged (SUSPENDED), or CRITICAL-rule hit always
-    # waits for a human. Decisions are stamped resolved_by="system:policy".
+    # Customer-authentication gate for the bottom of the MEDIUM band: a
+    # MEDIUM transaction scoring at/below AUTH_REQUIRED_MAX_SCORE (i.e. 40-45)
+    # is held as PENDING with required_action='USER_AUTH' - "awaiting user
+    # authentication". Analysts must NOT flag these; the customer clears the
+    # hold by authenticating (-> APPROVED). If they have not authenticated
+    # within AUTH_LIFESPAN_MIN minutes the policy sweep blocks it instead
+    # (-> BLOCKED, resolved_by='system:auth-timeout').
+    AUTH_REQUIRED_MAX_SCORE: int = int(os.getenv("AUTH_REQUIRED_MAX_SCORE", "45"))
+    AUTH_LIFESPAN_MIN: int = int(os.getenv("AUTH_LIFESPAN_MIN", "15"))
+
+    # Policy sweep trigger (the dashboard nudges it on its poll). The sweep
+    # itself only ever auto-BLOCKS unauthenticated USER_AUTH holds past their
+    # lifespan; it never auto-approves. BATCH bounds rows per run.
     AUTO_RESOLVE_ENABLED: bool = os.getenv("AUTO_RESOLVE_ENABLED", "true").lower() == "true"
-    AUTO_RESOLVE_AFTER_MIN: int = int(os.getenv("AUTO_RESOLVE_AFTER_MIN", "15"))
-    AUTO_RESOLVE_MAX_SCORE: int = int(os.getenv("AUTO_RESOLVE_MAX_SCORE", "45"))
     AUTO_RESOLVE_BATCH: int = int(os.getenv("AUTO_RESOLVE_BATCH", "50"))
 
     # CORS: comma-separated allowlist of dashboard origins. Defaults to "*"

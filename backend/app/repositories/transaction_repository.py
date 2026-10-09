@@ -35,7 +35,7 @@ _PLACEHOLDER_RE = re.compile(r"\?")
 # start (those checks were a serverless startup-cost multiplier).
 # v4: model_prediction - immutable snapshot of the model's verdict at write
 # time (resolve used to overwrite the only copy of it inside is_fraud).
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 
 # Cap how many historical rows feature engineering will load per queried
 # user/beneficiary. Bounded windows keep prediction latency flat as the
@@ -200,7 +200,8 @@ class TransactionRepository:
                     resolved_by TEXT,
                     resolved_at TEXT,
                     claimed_by TEXT,
-                    claimed_at TEXT
+                    claimed_at TEXT,
+                    required_action TEXT
                 )
             """)
 
@@ -277,7 +278,8 @@ class TransactionRepository:
             with self.get_connection() as conn:
                 # Migration check: add any columns that don't exist yet
                 # (payment_method, status, resolved_by, resolved_at, claimed_by,
-                # claimed_at, model_prediction) - safe to re-run on an existing DB.
+                # claimed_at, model_prediction, required_action) - safe to
+                # re-run on an existing DB.
                 for col_name, col_def in [
                     ("payment_method", "TEXT DEFAULT 'USSD'"),
                     ("status", "TEXT DEFAULT 'APPROVED'"),
@@ -286,6 +288,7 @@ class TransactionRepository:
                     ("claimed_by", "TEXT"),
                     ("claimed_at", "TEXT"),
                     ("model_prediction", "INTEGER"),
+                    ("required_action", "TEXT"),
                 ]:
                     col_check = conn.execute("""
                         SELECT column_name FROM information_schema.columns
@@ -310,6 +313,19 @@ class TransactionRepository:
                     END
                     WHERE model_prediction IS NULL
                 """)
+                # Backfill the customer-authentication gate for rows written
+                # before required_action existed: any still-open MEDIUM hold in
+                # the 40-45 band awaits user authentication. WHERE IS NULL keeps
+                # the whole step idempotent.
+                conn.execute("""
+                    UPDATE transactions
+                    SET required_action = 'USER_AUTH'
+                    WHERE required_action IS NULL
+                      AND status = 'PENDING'
+                      AND risk_level = 'MEDIUM'
+                      AND risk_score IS NOT NULL
+                      AND risk_score <= ?
+                """, (settings.AUTH_REQUIRED_MAX_SCORE,))
                 conn.commit()
             self.upsert_setting("schema_version", SCHEMA_VERSION)
 
@@ -429,6 +445,16 @@ class TransactionRepository:
                          latitude: float, longitude: float, is_fraud: int,
                          prob: float, score: int, level: str, rules: list,
                          payment_method: str = "USSD", status: str = "APPROVED") -> dict:
+        # Customer-authentication gate: a MEDIUM hold in the bottom of the band
+        # (score <= AUTH_REQUIRED_MAX_SCORE, i.e. 40-45) is not analyst work -
+        # it awaits the customer's own authentication and auto-blocks if they
+        # don't respond within AUTH_LIFESPAN_MIN (see run_auth_timeout_sweep).
+        required_action = (
+            "USER_AUTH"
+            if level == "MEDIUM" and score is not None
+            and score <= settings.AUTH_REQUIRED_MAX_SCORE
+            else None
+        )
         with self.get_connection() as conn:
             rules_str = json.dumps(rules)
             created_at = datetime.now().isoformat()
@@ -437,12 +463,12 @@ class TransactionRepository:
                 INSERT INTO transactions
                 (transaction_id, user_id, amount, transaction_type, timestamp, beneficiary_id, device_id,
                  location_latitude, location_longitude, is_fraud, model_prediction, fraud_probability,
-                 risk_score, risk_level, triggered_rules, created_at, payment_method, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 risk_score, risk_level, triggered_rules, created_at, payment_method, status, required_action)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 txn_id, user_id, amount, txn_type, timestamp, beneficiary_id, device_id,
                 latitude, longitude, is_fraud, is_fraud, prob, score, level, rules_str,
-                created_at, payment_method, status
+                created_at, payment_method, status, required_action
             ))
 
             # Update user profile dynamically
@@ -518,7 +544,8 @@ class TransactionRepository:
             "resolved_by": None,
             "resolved_at": None,
             "claimed_by": None,
-            "claimed_at": None
+            "claimed_at": None,
+            "required_action": required_action
         }
 
     def suspend_transaction(self, txn_id: str, flagged_by_email: str) -> dict:
@@ -539,6 +566,7 @@ class TransactionRepository:
                 UPDATE transactions
                 SET status = 'SUSPENDED', claimed_by = ?, claimed_at = ?
                 WHERE transaction_id = ? AND status = 'PENDING'
+                  AND (required_action IS NULL OR required_action <> 'USER_AUTH')
                 RETURNING *
             """, (flagged_by_email, claimed_at, txn_id))
             updated = cursor.fetchone()
@@ -547,11 +575,14 @@ class TransactionRepository:
             if updated:
                 return dict(updated)
 
-            # No row was updated: it either doesn't exist or is no longer PENDING.
+            # No row was updated: it either doesn't exist, is already handled,
+            # or is a customer-authentication hold that analysts must not flag.
             cursor = conn.execute("SELECT * FROM transactions WHERE transaction_id = ?", (txn_id,))
             row = cursor.fetchone()
             if not row:
                 return {"error": "not_found"}
+            if row["status"] == "PENDING" and row.get("required_action") == "USER_AUTH":
+                return {"error": "auth_required"}
             return {"error": "not_pending"}
 
     def resolve_transaction(self, txn_id: str, decision: str, resolved_by: str) -> dict | None:
@@ -566,7 +597,7 @@ class TransactionRepository:
             conn.execute("""
                 UPDATE transactions
                 SET status = ?, resolved_by = ?, resolved_at = ?,
-                    is_fraud = ?
+                    is_fraud = ?, required_action = NULL
                 WHERE transaction_id = ?
             """, (
                 decision,
@@ -580,6 +611,37 @@ class TransactionRepository:
             cursor = conn.execute("SELECT * FROM transactions WHERE transaction_id = ?", (txn_id,))
             updated = cursor.fetchone()
             return dict(updated) if updated else None
+
+    def authenticate_transaction(self, txn_id: str, authenticated_by: str = "customer:auth") -> dict:
+        """Customer clears a USER_AUTH hold by authenticating (OTP / biometric
+        in the real flow; simulated from the dashboard here). Only a PENDING
+        row with required_action='USER_AUTH' can be cleared this way - it
+        becomes APPROVED, the hold is dropped, and the timeout sweep can never
+        touch it afterwards. Returns {'error': ...} if the row is missing or
+        no longer awaiting authentication."""
+        resolved_at = datetime.now().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE transactions
+                SET status = 'APPROVED', is_fraud = 0, resolved_by = ?,
+                    resolved_at = ?, required_action = NULL
+                WHERE transaction_id = ? AND status = 'PENDING'
+                  AND required_action = 'USER_AUTH'
+                RETURNING *
+            """, (authenticated_by, resolved_at, txn_id))
+            updated = cursor.fetchone()
+            conn.commit()
+
+            if updated:
+                return dict(updated)
+
+            cursor = conn.execute("SELECT * FROM transactions WHERE transaction_id = ?", (txn_id,))
+            row = cursor.fetchone()
+            if not row:
+                return {"error": "not_found"}
+            if row["status"] != "PENDING":
+                return {"error": "not_pending"}
+            return {"error": "not_auth"}
 
     def get_recent_transactions(self, user_id: str, timestamp_iso: str, minutes_offset: int) -> list:
         try:
@@ -819,7 +881,7 @@ class TransactionRepository:
                     COUNT(*) FILTER (WHERE status IN ('APPROVED', 'BLOCKED')) AS completed_total,
                     COUNT(*) FILTER (WHERE resolved_at IS NOT NULL) AS resolved_total,
                     COUNT(*) FILTER (WHERE resolved_at >= ?) AS resolved_24h,
-                    COUNT(*) FILTER (WHERE resolved_by = 'system:policy' AND resolved_at >= ?) AS auto_24h
+                    COUNT(*) FILTER (WHERE resolved_by IN ('system:policy', 'system:auth-timeout') AND resolved_at >= ?) AS auto_24h
                 FROM transactions
             """, (cutoff_24h, cutoff_24h))
             agg = cursor.fetchone()
@@ -861,7 +923,7 @@ class TransactionRepository:
                     COUNT(*) AS total,
                     COUNT(*) FILTER (WHERE status = 'APPROVED') AS approved,
                     COUNT(*) FILTER (WHERE status = 'BLOCKED') AS blocked,
-                    COUNT(*) FILTER (WHERE resolved_by = 'system:policy') AS auto_resolved,
+                    COUNT(*) FILTER (WHERE resolved_by IN ('system:policy', 'system:auth-timeout')) AS auto_resolved,
                     COUNT(*) FILTER (WHERE claimed_by IS NOT NULL) AS analyst_flagged,
                     COUNT(*) FILTER (WHERE status = 'SUSPENDED') AS still_pending
                 FROM transactions
@@ -879,72 +941,57 @@ class TransactionRepository:
             "still_pending": int(row["still_pending"] or 0),
         }
 
-    def run_auto_resolve_policy(self) -> dict:
-        """Conservative policy sweep for unclaimed backlog. Eligible rows are
-        unclaimed PENDING transactions in the very bottom of the MEDIUM band
-        (risk_level='MEDIUM' and risk_score <= AUTO_RESOLVE_MAX_SCORE) that
-        have been untouched for AUTO_RESOLVE_AFTER_MIN minutes. Any CRITICAL
-        rule hit disqualifies the row. The final UPDATE re-asserts
-        status='PENDING', so a transaction an analyst suspends between our
-        SELECT and UPDATE is never auto-resolved - SUSPENDED work stays
-        strictly human. Decisions are stamped resolved_by='system:policy'."""
+    def run_auth_timeout_sweep(self) -> dict:
+        """Customer-authentication timeout sweep. A USER_AUTH hold (MEDIUM
+        bottom band, 40-45) that is still PENDING and unclaimed past its
+        AUTH_LIFESPAN_MIN window auto-BLOCKS: the customer never authenticated,
+        so the funds are held back. The final UPDATE re-asserts PENDING +
+        required_action='USER_AUTH', so a row that gets authenticated (or
+        admin-resolved) between our SELECT and UPDATE is never clobbered.
+        Decisions are stamped resolved_by='system:auth-timeout'."""
         if not settings.AUTO_RESOLVE_ENABLED:
-            return {"enabled": False, "candidates": 0, "resolved": 0, "ids": []}
+            return {"enabled": False, "candidates": 0, "blocked": 0, "resolved": 0, "ids": []}
 
         cutoff = (
-            datetime.now() - timedelta(minutes=settings.AUTO_RESOLVE_AFTER_MIN)
+            datetime.now() - timedelta(minutes=settings.AUTH_LIFESPAN_MIN)
         ).isoformat()
         with self.get_connection() as conn:
             cursor = conn.execute("""
-                SELECT transaction_id, triggered_rules
+                SELECT transaction_id
                 FROM transactions
                 WHERE status = 'PENDING'
-                  AND risk_level = 'MEDIUM'
-                  AND risk_score IS NOT NULL
-                  AND risk_score <= ?
+                  AND required_action = 'USER_AUTH'
                   AND created_at <= ?
                 ORDER BY created_at ASC
                 LIMIT ?
-            """, (
-                settings.AUTO_RESOLVE_MAX_SCORE,
-                cutoff,
-                settings.AUTO_RESOLVE_BATCH,
-            ))
+            """, (cutoff, settings.AUTO_RESOLVE_BATCH))
             candidates = [dict(r) for r in cursor.fetchall()]
 
-            eligible_ids = []
-            for cand in candidates:
-                rules = cand.get("triggered_rules") or []
-                if isinstance(rules, str):
-                    try:
-                        rules = json.loads(rules)
-                    except (ValueError, TypeError):
-                        rules = []
-                has_critical = any(
-                    isinstance(r, dict) and r.get("severity") == "CRITICAL" for r in rules
-                )
-                if not has_critical:
-                    eligible_ids.append(cand["transaction_id"])
+            if not candidates:
+                return {"enabled": True, "candidates": 0, "blocked": 0, "resolved": 0, "ids": []}
 
-            if not eligible_ids:
-                return {"enabled": True, "candidates": len(candidates), "resolved": 0, "ids": []}
+            candidate_ids = [c["transaction_id"] for c in candidates]
 
-            # Race-safe: re-assert PENDING so rows claimed meanwhile are skipped.
+            # Race-safe: re-assert PENDING + USER_AUTH so rows the customer
+            # authenticated meanwhile are skipped.
             cursor = conn.execute("""
                 UPDATE transactions
-                SET status = 'APPROVED', resolved_by = 'system:policy',
-                    resolved_at = ?, is_fraud = 0
+                SET status = 'BLOCKED', is_fraud = 1,
+                    resolved_by = 'system:auth-timeout',
+                    resolved_at = ?, required_action = NULL
                 WHERE transaction_id = ANY(?) AND status = 'PENDING'
+                  AND required_action = 'USER_AUTH'
                 RETURNING transaction_id
-            """, (datetime.now().isoformat(), eligible_ids))
-            resolved_ids = [r["transaction_id"] for r in cursor.fetchall()]
+            """, (datetime.now().isoformat(), candidate_ids))
+            blocked_ids = [r["transaction_id"] for r in cursor.fetchall()]
             conn.commit()
 
         return {
             "enabled": True,
             "candidates": len(candidates),
-            "resolved": len(resolved_ids),
-            "ids": resolved_ids,
+            "blocked": len(blocked_ids),
+            "resolved": len(blocked_ids),
+            "ids": blocked_ids,
         }
 
     def get_feedback_confusion_matrix(self, days: int | None = None) -> dict:
@@ -957,9 +1004,10 @@ class TransactionRepository:
         touched by a decision.
 
         Only human-resolved rows count: unresolved rows have no ground truth
-        yet, and system:policy auto-resolves are machine decisions, not
-        customer feedback. `days=None` (default) covers ALL transaction
-        history; a positive int restricts to a rolling window. One
+        yet, and system decisions (system:policy, system:auth-timeout) or
+        customer authentications (customer:auth) are machine/customer
+        outcomes, not analyst feedback. `days=None` (default) covers ALL
+        transaction history; a positive int restricts to a rolling window. One
         FILTER-aggregate pass either way; the optional resolved_at window
         uses the same ISO-text comparison as the created_at windows."""
         params: list = []
@@ -980,7 +1028,7 @@ class TransactionRepository:
                 WHERE model_prediction IS NOT NULL
                   AND is_fraud IS NOT NULL
                   AND resolved_by IS NOT NULL
-                  AND resolved_by <> 'system:policy'
+                  AND resolved_by NOT IN ('system:policy', 'system:auth-timeout', 'customer:auth')
                   {where_extra}
             """, tuple(params))
             row = cursor.fetchone()
