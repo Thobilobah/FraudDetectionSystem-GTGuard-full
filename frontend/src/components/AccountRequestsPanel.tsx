@@ -38,7 +38,7 @@ export const AccountRequestsPanel: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [unblockingId, setUnblockingId] = useState<string | null>(null);
-  const [detailTxnId, setDetailTxnId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<{ txnId: string; request: AccountSuspendRequest | null } | null>(null);
 
   const refresh = useCallback(async () => {
     setFetching(true);
@@ -217,7 +217,7 @@ export const AccountRequestsPanel: React.FC = () => {
                       return (
                         <tr
                           key={row.request_id}
-                          onClick={() => row.source_txn_id && setDetailTxnId(row.source_txn_id)}
+                          onClick={() => row.source_txn_id && setDetail({ txnId: row.source_txn_id, request: row })}
                           className={`hover:bg-dark-border/10 transition ${row.source_txn_id ? "cursor-pointer" : ""}`}
                         >
                           <td className="px-3 py-3.5 text-xs text-dark-muted font-semibold whitespace-nowrap">
@@ -357,7 +357,7 @@ export const AccountRequestsPanel: React.FC = () => {
                 {blocked.map((acc) => (
                   <tr
                     key={acc.account_id}
-                    onClick={() => acc.source_txn_id && setDetailTxnId(acc.source_txn_id)}
+                    onClick={() => acc.source_txn_id && setDetail({ txnId: acc.source_txn_id, request: null })}
                     className={`hover:bg-dark-border/10 transition ${acc.source_txn_id ? "cursor-pointer" : ""}`}
                   >
                     <td className="px-3 py-3.5">
@@ -394,9 +394,10 @@ export const AccountRequestsPanel: React.FC = () => {
       )}
 
       <TransactionDetailsModal
-        transactionId={detailTxnId}
-        onClose={() => setDetailTxnId(null)}
-        onResolved={view === "requests" ? refresh : loadBlocklist}
+        transactionId={detail?.txnId ?? null}
+        suspendRequest={detail?.request ?? null}
+        onClose={() => setDetail(null)}
+        onReviewed={view === "requests" ? refresh : loadBlocklist}
       />
     </div>
   );

@@ -1,36 +1,38 @@
 import React, { useEffect, useState } from "react";
-import type { Transaction } from "../types";
+import type { Transaction, AccountSuspendRequest } from "../types";
 import {
   X, ShieldCheck, ShieldAlert, AlertCircle, MapPin, Tablet, UserCheck,
-  Shield, Activity, PauseCircle, Loader2, User, Fingerprint, Clock,
+  Shield, Activity, PauseCircle, Loader2, User, Fingerprint, Ban,
 } from "lucide-react";
-import { getTransactionById, resolveTransaction, authenticateTransaction } from "../services/api";
+import { getTransactionById, reviewSuspendRequest } from "../services/api";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
 import { formatPlace, isInNigeria } from "../utils/nigeriaPlaces";
 
 interface TransactionDetailsModalProps {
   transactionId: string | null;
+  suspendRequest?: AccountSuspendRequest | null;
   onClose: () => void;
-  onResolved?: () => void;
+  onReviewed?: () => void;
 }
 
 /**
- * Read-only (plus admin resolve) transaction inspector opened from the Review
- * Queue. Mirrors the Live Monitor detailed-analysis pane so both surfaces show
- * the same full transaction breakdown.
+ * Read-only transaction inspector opened from the Review Queue, with the
+ * admin account-suspension decision (Suspend / Decline) inline. Mirrors the
+ * Live Monitor detailed-analysis pane so both surfaces show the same full
+ * transaction breakdown.
  */
 export const TransactionDetailsModal: React.FC<TransactionDetailsModalProps> = ({
   transactionId,
+  suspendRequest,
   onClose,
-  onResolved,
+  onReviewed,
 }) => {
   const { showToast } = useToast();
   const [txn, setTxn] = useState<Transaction | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [resolvingId, setResolvingId] = useState<string | null>(null);
-  const [authingId, setAuthingId] = useState<string | null>(null);
+  const [deciding, setDeciding] = useState(false);
 
   useEffect(() => {
     if (!transactionId) {
@@ -64,53 +66,23 @@ export const TransactionDetailsModal: React.FC<TransactionDetailsModalProps> = (
   const isAuthHold = (t: Transaction) =>
     t.status === "PENDING" && t.required_action === "USER_AUTH";
 
-  const refetch = async () => {
+  const handleDecide = async (decision: "APPROVED" | "DECLINED") => {
+    if (!suspendRequest) return;
+    setDeciding(true);
     try {
-      setTxn(await getTransactionById(transactionId));
-    } catch (e) {
-      console.error("Failed to reload transaction:", e);
-    }
-  };
-
-  const handleResolve = async (decision: "APPROVED" | "BLOCKED") => {
-    if (!txn) return;
-    const txnId = txn.transaction_id;
-    setResolvingId(txnId);
-    try {
-      const updated = await resolveTransaction(txnId, decision);
-      setTxn((prev) => (prev ? { ...prev, ...updated } : prev));
+      await reviewSuspendRequest(suspendRequest.request_id, decision);
       if (decision === "APPROVED") {
-        showToast("success", "Transaction approved", `${txnId} has been cleared and marked APPROVED.`);
+        showToast("success", "Account suspended", `${suspendRequest.account_id} was added to the account blocklist.`);
       } else {
-        showToast("danger", "Transaction blocked", `${txnId} has been declined and marked BLOCKED.`);
+        showToast("danger", "Request declined", `${suspendRequest.account_id} was left unblocked.`);
       }
-      await refetch();
-      onResolved?.();
-    } catch (e) {
-      console.error("Failed to resolve transaction:", e);
-      showToast("danger", "Action failed", "Could not resolve this transaction. Please try again.");
-    } finally {
-      setResolvingId(null);
-    }
-  };
-
-  const handleAuthenticate = async () => {
-    if (!txn) return;
-    const txnId = txn.transaction_id;
-    setAuthingId(txnId);
-    try {
-      const updated = await authenticateTransaction(txnId);
-      setTxn((prev) => (prev ? { ...prev, ...updated } : prev));
-      showToast("success", "Customer authenticated", `${txnId} cleared the authentication hold and is now APPROVED.`);
-      await refetch();
-      onResolved?.();
+      onReviewed?.();
+      onClose();
     } catch (e: any) {
       const detail = e?.response?.data?.detail;
-      showToast("danger", "Authentication failed", typeof detail === "string" ? detail : "Could not authenticate this transaction. Please try again.");
-      await refetch();
-      onResolved?.();
+      showToast("danger", "Action failed", typeof detail === "string" ? detail : "Could not review this request.");
     } finally {
-      setAuthingId(null);
+      setDeciding(false);
     }
   };
 
@@ -150,8 +122,7 @@ export const TransactionDetailsModal: React.FC<TransactionDetailsModalProps> = (
     );
   };
 
-  const busy = resolvingId === txn?.transaction_id;
-  const authBusy = authingId === txn?.transaction_id;
+  const canDecide = !!suspendRequest && suspendRequest.status === "PENDING";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
@@ -186,48 +157,56 @@ export const TransactionDetailsModal: React.FC<TransactionDetailsModalProps> = (
               {statusBadge(txn)}
             </div>
 
-            {/* Admin resolve / authentication hold */}
-            <div className="bg-guard-orangeLight border border-guard-orange/30 rounded-lg p-4 space-y-3">
-              {isAuthHold(txn) && (
-                <>
-                  <p className="text-xs text-brand-warning font-semibold leading-relaxed flex items-start gap-1.5">
-                    <Clock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                    <span>
-                      This medium-risk transaction is awaiting the customer's authentication
-                      (OTP / biometric). If it is not authenticated within 15 minutes, the system
-                      blocks it automatically.
-                    </span>
+            {/* Account-suspension decision */}
+            {suspendRequest && (
+              <div
+                className={`rounded-lg p-4 space-y-3 border ${
+                  suspendRequest.status === "APPROVED"
+                    ? "bg-brand-danger/5 border-brand-danger/30"
+                    : suspendRequest.status === "DECLINED"
+                    ? "bg-gray-50 dark:bg-white/5 border-dark-border"
+                    : "bg-brand-warning/5 border-brand-warning/30"
+                }`}
+              >
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider block text-dark-muted">
+                    Account Suspension · {suspendRequest.status}
+                  </span>
+                  <p className="text-xs text-dark-text font-semibold mt-1 flex items-center gap-1.5">
+                    <UserCheck className="h-3.5 w-3.5 text-guard-orange" /> {suspendRequest.account_id}
                   </p>
-                  <button
-                    disabled={authBusy}
-                    onClick={handleAuthenticate}
-                    className="w-full bg-brand-warning text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-warning/90 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
-                  >
-                    {authBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Fingerprint className="h-3.5 w-3.5" />}
-                    {authBusy ? "Authenticating..." : "Simulate Customer Authentication"}
-                  </button>
-                </>
-              )}
-              <p className="text-xs text-guard-orange font-semibold leading-relaxed">
-                Admin decision for this transaction. Approving clears it; blocking marks it as a fraud block.
-              </p>
-              <div className="flex gap-2">
-                <button
-                  disabled={busy}
-                  onClick={() => handleResolve("APPROVED")}
-                  className="flex-1 bg-brand-success text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-success/90 transition disabled:opacity-50"
-                >
-                  Approve Transaction
-                </button>
-                <button
-                  disabled={busy}
-                  onClick={() => handleResolve("BLOCKED")}
-                  className="flex-1 bg-brand-danger text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-danger/90 transition disabled:opacity-50"
-                >
-                  Block Transaction
-                </button>
+                  {suspendRequest.note && (
+                    <p className="text-xs text-dark-text leading-snug whitespace-pre-wrap mt-1.5">{suspendRequest.note}</p>
+                  )}
+                  <p className="text-[10px] text-dark-muted mt-1.5">
+                    Requested by <span className="font-semibold text-dark-text">{suspendRequest.requested_by}</span>
+                    {suspendRequest.reviewed_by && (
+                      <> · decided by <span className="font-semibold text-dark-text">{suspendRequest.reviewed_by}</span></>
+                    )}
+                  </p>
+                </div>
+
+                {canDecide && (
+                  <div className="flex gap-2">
+                    <button
+                      disabled={deciding}
+                      onClick={() => handleDecide("APPROVED")}
+                      className="flex-1 bg-brand-danger text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-danger/90 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                    >
+                      {deciding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Ban className="h-3.5 w-3.5" />}
+                      Suspend
+                    </button>
+                    <button
+                      disabled={deciding}
+                      onClick={() => handleDecide("DECLINED")}
+                      className="flex-1 bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text text-xs font-bold py-2 rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                    >
+                      <X className="h-3.5 w-3.5" /> Decline
+                    </button>
+                  </div>
+                )}
               </div>
-            </div>
+            )}
 
             {txn.claimed_by && (
               <div className="text-[11px] text-guard-orange bg-guard-orangeLight border border-guard-orange/30 rounded-lg px-3 py-2 flex items-center gap-2">
