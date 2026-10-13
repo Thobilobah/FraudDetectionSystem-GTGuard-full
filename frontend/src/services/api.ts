@@ -162,15 +162,10 @@ export const resolveTransaction = async (
   return response.data;
 };
 
-export const suspendTransaction = async (transactionId: string): Promise<Transaction> => {
-  const response = await api.patch(`/transactions/${transactionId}/suspend`);
-  return response.data;
-};
-
 /**
  * Simulate the customer clearing an "awaiting user authentication" hold on a
- * MEDIUM 40-45 transaction (OTP/biometric in production) -> APPROVED. Without
- * it the auth-timeout sweep blocks the transaction after 15 minutes.
+ * MEDIUM transaction (OTP/biometric in production) -> APPROVED. Without it
+ * the auth-timeout sweep blocks the transaction after 15 minutes.
  */
 export const authenticateTransaction = async (transactionId: string): Promise<Transaction> => {
   const response = await api.post(`/transactions/${transactionId}/authenticate`);
@@ -191,14 +186,6 @@ export interface BulkResult {
   succeeded: string[];
   failed: { transaction_id: string; reason: string }[];
 }
-
-/** Analyst batch-flag: same semantics as suspendTransaction, per row. */
-export const bulkSuspendTransactions = async (transactionIds: string[]): Promise<BulkResult> => {
-  const response = await api.post("/transactions/bulk-suspend", {
-    transaction_ids: transactionIds,
-  });
-  return response.data;
-};
 
 /** Admin batch decision over up to 100 PENDING/SUSPENDED rows. */
 export const bulkResolveTransactions = async (

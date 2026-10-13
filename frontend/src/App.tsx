@@ -267,7 +267,7 @@ export default function App() {
                 Live Monitor
               </button>
 
-              {/* Admin-only: work analysts flagged and routed for review */}
+              {/* Admin-only: account-suspension requests analysts raised */}
               {isAdmin && (
                 <button
                   onClick={() => setActiveTab("review")}

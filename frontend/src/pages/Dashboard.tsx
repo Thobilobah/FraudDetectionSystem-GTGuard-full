@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import type { RealTimeMetrics, ModelMetadata, Transaction, SuspendRequestSla } from "../types";
+import type { RealTimeMetrics, ModelMetadata, Transaction, SuspendRequestSla, AccountSuspendRequest } from "../types";
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Bar, Legend
@@ -8,7 +8,7 @@ import {
   ShieldAlert, ShieldCheck, Activity, Percent, ArrowUpRight, TrendingUp, AlertTriangle, Inbox, Flag, Loader2, Clock
 } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
-import { getStoredUser, getTransactionsPage, getSuspendRequestSla, type QueueMetrics } from "../services/api";
+import { getStoredUser, getSuspendRequestSla, getSuspendRequests, type QueueMetrics } from "../services/api";
 import { parseApiTimestamp } from "../utils/time";
 import { SlaPieChart } from "../components/SlaPieChart";
 
@@ -41,15 +41,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
     .filter(t => t.risk_score !== null && t.risk_score >= 70)
     .slice(0, 5);
 
-  // Analyst's own flagged work: server-filtered on claimed_by = my email, so
-  // every analyst sees ONLY the transactions they personally suspended
-  // (each analyst's section is unique to them), newest first.
+  // Analyst's own raised work: account-suspension requests they filed against
+  // HIGH-risk senders, server-filtered to their own email, newest first.
   const analystEmail = !isAdmin ? (getStoredUser()?.email ?? "") : "";
-  const myFlagsPageSize = 10;
-  const [myFlags, setMyFlags] = useState<Transaction[]>([]);
-  const [myFlagsTotal, setMyFlagsTotal] = useState(0);
-  const [myFlagsPage, setMyFlagsPage] = useState(0);
-  const [myFlagsLoading, setMyFlagsLoading] = useState(true);
+  const myRequestsPageSize = 10;
+  const [myRequests, setMyRequests] = useState<AccountSuspendRequest[]>([]);
+  const [myRequestsTotal, setMyRequestsTotal] = useState(0);
+  const [myRequestsPage, setMyRequestsPage] = useState(0);
+  const [myRequestsLoading, setMyRequestsLoading] = useState(true);
 
   // Account-suspension review SLA (admin decision latency), polled like the
   // rest of the dashboard. Analysts see only their own requests; admins see
@@ -59,32 +58,31 @@ export const Dashboard: React.FC<DashboardProps> = ({
   useEffect(() => {
     if (!analystEmail) return;
     let alive = true;
-    const loadFlags = async () => {
+    const loadRequests = async () => {
       try {
-        const page = await getTransactionsPage({
-          flagged_by: analystEmail,
-          limit: myFlagsPageSize,
-          offset: myFlagsPage * myFlagsPageSize,
-          sort: "desc",
+        const page = await getSuspendRequests({
+          mine: true,
+          limit: myRequestsPageSize,
+          offset: myRequestsPage * myRequestsPageSize,
         });
         if (!alive) return;
-        setMyFlags(page.items);
-        setMyFlagsTotal(page.total);
-        // Snap back if this page emptied (last row resolved elsewhere, or a
+        setMyRequests(page.items);
+        setMyRequestsTotal(page.total);
+        // Snap back if this page emptied (last request reviewed elsewhere, or a
         // shrinking list left this offset beyond the end).
-        if (page.items.length === 0 && page.total > 0 && myFlagsPage > 0) {
-          setMyFlagsPage(Math.max(0, Math.ceil(page.total / myFlagsPageSize) - 1));
+        if (page.items.length === 0 && page.total > 0 && myRequestsPage > 0) {
+          setMyRequestsPage(Math.max(0, Math.ceil(page.total / myRequestsPageSize) - 1));
         }
       } catch (e) {
-        console.error("My flagged transactions failed:", e);
+        console.error("My suspension requests failed:", e);
       } finally {
-        if (alive) setMyFlagsLoading(false);
+        if (alive) setMyRequestsLoading(false);
       }
     };
-    loadFlags();
-    const id = window.setInterval(loadFlags, 10000);
+    loadRequests();
+    const id = window.setInterval(loadRequests, 10000);
     return () => { alive = false; window.clearInterval(id); };
-  }, [analystEmail, myFlagsPage]);
+  }, [analystEmail, myRequestsPage]);
 
   useEffect(() => {
     let alive = true;
@@ -101,7 +99,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     return () => { alive = false; window.clearInterval(id); };
   }, [isAdmin]);
 
-  const myFlagsTotalPages = Math.max(1, Math.ceil(myFlagsTotal / myFlagsPageSize));
+  const myRequestsTotalPages = Math.max(1, Math.ceil(myRequestsTotal / myRequestsPageSize));
 
   const fmtWhen = (iso: string | null | undefined) =>
     iso ? parseApiTimestamp(iso).toLocaleString("en-NG", {
@@ -203,15 +201,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
       </div>
 
       {/* Account Review SLA - admin decision latency on account-suspension
-          requests, shown just above the analyst's own flagged work */}
+          requests, shown just above the analyst's own requests */}
       <SlaPieChart
         sla={sla}
         title="Account Review SLA"
         subtitle={isAdmin ? "All account-suspension requests" : "Your account-suspension requests"}
       />
 
-      {/* Analyst's own flagged work - analysts only, uniquely scoped to
-          claimed_by = this analyst's email (admins use the Review Queue) */}
+      {/* Analyst's own raised work - analysts only, uniquely scoped to their own
+          account-suspension requests (admins use the Review Queue) */}
       {!isAdmin && (
         <div className="bg-dark-card border border-dark-border rounded-xl p-5 shadow-glow-brand">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
@@ -220,62 +218,60 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <Flag className="h-5 w-5 text-guard-orange" />
               </div>
               <div className="min-w-0">
-                <h3 className="text-lg font-semibold text-dark-text">My Flagged Transactions</h3>
-                <p className="text-xs text-dark-muted">Transactions you suspended for admin review — newest first</p>
+                <h3 className="text-lg font-semibold text-dark-text">My Suspension Requests</h3>
+                <p className="text-xs text-dark-muted">Account-suspension requests you raised against flagged senders — newest first</p>
               </div>
             </div>
             <span className="self-start sm:self-auto inline-flex items-center gap-1.5 text-xs font-bold bg-guard-orangeLight border border-guard-orange/30 text-guard-orange px-3 py-1.5 rounded-full whitespace-nowrap">
-              <Flag className="h-3.5 w-3.5" /> {myFlagsTotal} flagged
+              <Flag className="h-3.5 w-3.5" /> {myRequestsTotal} request{myRequestsTotal === 1 ? "" : "s"}
             </span>
           </div>
 
-          {myFlagsLoading && myFlags.length === 0 ? (
+          {myRequestsLoading && myRequests.length === 0 ? (
             <div className="py-10 text-center">
               <Loader2 className="h-6 w-6 animate-spin text-guard-orange mx-auto" />
-              <p className="text-xs text-dark-muted mt-2">Loading your flagged transactions…</p>
+              <p className="text-xs text-dark-muted mt-2">Loading your suspension requests…</p>
             </div>
-          ) : myFlags.length > 0 ? (
+          ) : myRequests.length > 0 ? (
             <div>
               <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider">
                   <tr>
-                    <th className="px-3 py-3">Flagged At</th>
-                    <th className="px-3 py-3">Transaction ID</th>
-                    <th className="px-3 py-3">User Account</th>
-                    <th className="px-3 py-3 text-right">Amount</th>
+                    <th className="px-3 py-3">Requested At</th>
+                    <th className="px-3 py-3">Account</th>
+                    <th className="px-3 py-3 text-right">Source Amount</th>
                     <th className="px-3 py-3 text-center">Risk</th>
                     <th className="px-3 py-3">Current Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
-                  {myFlags.map((row) => (
-                    <tr key={row.transaction_id} className="hover:bg-dark-border/10 transition">
+                  {myRequests.map((req) => (
+                    <tr key={req.request_id} className="hover:bg-dark-border/10 transition">
                       <td className="px-3 py-3 text-xs text-dark-muted font-semibold whitespace-nowrap">
                         <span className="flex items-center gap-1.5">
                           <Clock className="h-3.5 w-3.5" />
-                          {fmtWhen(row.claimed_at || row.created_at)}
+                          {fmtWhen(req.requested_at)}
                         </span>
                       </td>
-                      <td className="px-3 py-3 font-mono text-xs font-semibold text-dark-text">{row.transaction_id}</td>
-                      <td className="px-3 py-3 text-dark-text font-medium">{row.user_id}</td>
-                      <td className="px-3 py-3 text-dark-text font-bold text-right">₦{row.amount.toLocaleString("en-NG")}</td>
-                      <td className="px-3 py-3 text-center">{flagRiskBadge(row.risk_level)}</td>
+                      <td className="px-3 py-3 font-mono text-xs font-semibold text-dark-text">{req.account_id}</td>
+                      <td className="px-3 py-3 text-dark-text font-bold text-right">
+                        {req.source_amount != null ? `₦${req.source_amount.toLocaleString("en-NG")}` : "—"}
+                      </td>
+                      <td className="px-3 py-3 text-center">{flagRiskBadge(req.source_risk_level)}</td>
                       <td className="px-3 py-3">
-                        {row.status === "SUSPENDED" ? (
-                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-guard-orange bg-guard-orangeLight border border-guard-orange/30 px-2 py-0.5 rounded">
+                        {req.status === "PENDING" ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-brand-warning bg-brand-warning/10 border border-brand-warning/30 px-2 py-0.5 rounded">
                             <Clock className="h-3 w-3" /> Awaiting admin review
                           </span>
-                        ) : row.status === "APPROVED" ? (
-                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-brand-success bg-brand-success/10 px-2 py-0.5 rounded">
-                            <ShieldCheck className="h-3 w-3" /> Approved{row.resolved_by ? ` by ${row.resolved_by}` : ""}
-                          </span>
-                        ) : row.status === "BLOCKED" ? (
-                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-brand-danger bg-brand-danger/10 px-2 py-0.5 rounded">
-                            <ShieldAlert className="h-3 w-3" /> Blocked{row.resolved_by ? ` by ${row.resolved_by}` : ""}
+                        ) : req.status === "APPROVED" ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-brand-danger bg-brand-danger/10 border border-brand-danger/20 px-2 py-0.5 rounded">
+                            <ShieldAlert className="h-3 w-3" /> Approved{req.reviewed_by ? ` by ${req.reviewed_by}` : ""}
                           </span>
                         ) : (
-                          <span className="text-xs text-dark-muted font-semibold">{row.status}</span>
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-dark-muted bg-dark-border/40 px-2 py-0.5 rounded">
+                            Declined{req.reviewed_by ? ` by ${req.reviewed_by}` : ""}
+                          </span>
                         )}
                       </td>
                     </tr>
@@ -283,21 +279,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </tbody>
               </table>
               </div>
-              {myFlagsTotalPages > 1 && (
+              {myRequestsTotalPages > 1 && (
                 <div className="flex items-center justify-between gap-3 mt-4 pt-3 border-t border-dark-border">
                   <button
-                    onClick={() => setMyFlagsPage((p) => Math.max(0, p - 1))}
-                    disabled={myFlagsPage === 0}
+                    onClick={() => setMyRequestsPage((p) => Math.max(0, p - 1))}
+                    disabled={myRequestsPage === 0}
                     className="text-xs font-bold px-3 py-1.5 rounded-lg bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Previous
                   </button>
                   <span className="text-xs text-dark-muted font-semibold">
-                    Page {myFlagsPage + 1} of {myFlagsTotalPages}
+                    Page {myRequestsPage + 1} of {myRequestsTotalPages}
                   </span>
                   <button
-                    onClick={() => setMyFlagsPage((p) => Math.min(myFlagsTotalPages - 1, p + 1))}
-                    disabled={myFlagsPage >= myFlagsTotalPages - 1}
+                    onClick={() => setMyRequestsPage((p) => Math.min(myRequestsTotalPages - 1, p + 1))}
+                    disabled={myRequestsPage >= myRequestsTotalPages - 1}
                     className="text-xs font-bold px-3 py-1.5 rounded-lg bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Next
@@ -308,8 +304,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
           ) : (
             <div className="py-8 text-center text-xs text-dark-muted">
               <Flag className="h-8 w-8 text-dark-muted/50 mx-auto mb-2" />
-              You haven't flagged any transactions yet. Suspend a medium-risk result from the
-              Live Monitor or Transaction Analyzer and it will appear here.
+              You haven't raised any suspension requests yet. When a HIGH-risk
+              transaction is auto-blocked, suspend the sender account from the
+              Live Monitor and it will appear here.
             </div>
           )}
         </div>
@@ -329,8 +326,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <span className="text-xs font-bold uppercase tracking-wider text-guard-orange block">Review Queue</span>
               <span className="text-sm text-dark-text font-semibold block truncate">
                 {(pendingQueueCount ?? 0) > 0
-                  ? `${pendingQueueCount} transaction${pendingQueueCount === 1 ? "" : "s"} flagged by analysts awaiting your decision`
-                  : "No pending work — analysts haven't flagged anything right now"}
+                  ? `${pendingQueueCount} account-suspension request${pendingQueueCount === 1 ? "" : "s"} awaiting your decision`
+                  : "No pending work — no account-suspension requests right now"}
               </span>
               <span className="text-xs text-dark-muted block mt-0.5">
                 {resolvedCount ?? 0} completed review{(resolvedCount ?? 0) === 1 ? "" : "s"} stamped

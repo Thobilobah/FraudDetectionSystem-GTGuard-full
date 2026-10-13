@@ -39,14 +39,14 @@ class Settings:
     RISK_THRESHOLD_LOW: int = int(os.getenv("RISK_THRESHOLD_LOW", "40"))
     RISK_THRESHOLD_HIGH: int = int(os.getenv("RISK_THRESHOLD_HIGH", "70"))
 
-    # Customer-authentication gate for the bottom of the MEDIUM band: a
-    # MEDIUM transaction scoring at/below AUTH_REQUIRED_MAX_SCORE (i.e. 40-45)
-    # is held as PENDING with required_action='USER_AUTH' - "awaiting user
+    # Customer-authentication gate for the WHOLE MEDIUM band: every MEDIUM
+    # transaction (scoring below the HIGH threshold, i.e. 40-69) is held as
+    # PENDING with required_action='USER_AUTH' - "awaiting user
     # authentication". Analysts must NOT flag these; the customer clears the
     # hold by authenticating (-> APPROVED). If they have not authenticated
     # within AUTH_LIFESPAN_MIN minutes the policy sweep blocks it instead
     # (-> BLOCKED, resolved_by='system:auth-timeout').
-    AUTH_REQUIRED_MAX_SCORE: int = int(os.getenv("AUTH_REQUIRED_MAX_SCORE", "45"))
+    AUTH_REQUIRED_MAX_SCORE: int = int(os.getenv("AUTH_REQUIRED_MAX_SCORE", "70"))
     AUTH_LIFESPAN_MIN: int = int(os.getenv("AUTH_LIFESPAN_MIN", "15"))
 
     # Policy sweep trigger (the dashboard nudges it on its poll). The sweep

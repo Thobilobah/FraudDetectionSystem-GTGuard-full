@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import {
-  generateDemoTransaction, predictFeatures, getFeatureExplanation, suspendTransaction, getStoredUser
+  generateDemoTransaction, predictFeatures, getFeatureExplanation, getStoredUser
 } from "../services/api";
 import {
   startSimulation, stopSimulation, subscribeSimulation, getSimulationState,
@@ -8,7 +8,7 @@ import {
 } from "../services/simulationStream";
 import type { TriggeredRule } from "../types";
 import { 
-  Activity, ShieldAlert, ShieldCheck, HelpCircle, Terminal, RefreshCw, Send, Sliders, PauseCircle, Loader2, Play, StopCircle
+  Activity, ShieldAlert, ShieldCheck, HelpCircle, Terminal, RefreshCw, Send, Sliders, PauseCircle, Play, StopCircle
 } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 import { FraudGauge } from "../components/FraudGauge";
@@ -70,7 +70,6 @@ export const TransactionAnalyzer: React.FC = () => {
   
   const [manualResult, setManualResult] = useState<any>(null);
   const [isLoadingManual, setIsLoadingManual] = useState(false);
-  const [isSuspending, setIsSuspending] = useState(false);
 
   // Real-time simulation stream: the loop itself lives in the module-level
   // simulationStream service, so it keeps running while the user navigates
@@ -91,34 +90,10 @@ export const TransactionAnalyzer: React.FC = () => {
     };
   }, [showToast]);
 
-  // Analysts (non-admins) can suspend a MEDIUM-risk result straight from
-  // the analyzer: PATCH /transactions/{id}/suspend moves it PENDING ->
-  // SUSPENDED and stamps claimed_by with their email. Only PENDING rows
-  // can be suspended (server rejects anything else), and resolving after
-  // that stays admin-only.
-  const handleSuspendFlagged = async (txnId: string, apply: (row: any) => void) => {
-    if (!txnId || isSuspending) return;
-    setIsSuspending(true);
-    try {
-      const updated = await suspendTransaction(txnId);
-      apply(updated);
-      showToast(
-        "suspended",
-        "Transaction suspended",
-        `${updated.transaction_id || txnId} is flagged under your name, pending admin review.`
-      );
-    } catch (e: any) {
-      const detail = e?.response?.data?.detail;
-      showToast(
-        "danger",
-        "Could not suspend",
-        typeof detail === "string" ? detail : "The transaction could not be suspended. It may already have been actioned."
-      );
-    } finally {
-      setIsSuspending(false);
-    }
-  };
-
+  // MEDIUM-risk results are a customer-authentication hold, not analyst work:
+  // the analyzer no longer offers a "Suspend Transaction" action. PENDING
+  // status now simply means the customer has 15 minutes to authenticate
+  // before the system auto-blocks the transaction.
   useEffect(() => {
     // Load feature definitions
     getFeatureExplanation().then(data => setExplanations(data)).catch(() => {});
@@ -168,8 +143,8 @@ export const TransactionAnalyzer: React.FC = () => {
       if (result.status === "PENDING") {
         showToast(
           "suspended",
-          "Flagged for review",
-          `${result.transaction_id || "This transaction"} is medium risk and awaiting analyst or admin action.`
+          "Awaiting user authentication",
+          `${result.transaction_id || "This transaction"} is medium risk — the customer has 15 minutes to authenticate before it is auto-blocked.`
         );
       }
     } catch (e) {
@@ -189,8 +164,8 @@ export const TransactionAnalyzer: React.FC = () => {
       if (data.status === "PENDING") {
         showToast(
           "suspended",
-          "Flagged for review",
-          `${data.transaction_id || "This transaction"} is medium risk and awaiting analyst or admin action.`
+          "Awaiting user authentication",
+          `${data.transaction_id || "This transaction"} is medium risk — the customer has 15 minutes to authenticate before it is auto-blocked.`
         );
       }
     } catch (e) {
@@ -459,23 +434,10 @@ export const TransactionAnalyzer: React.FC = () => {
                       <div className="flex-1 flex items-center gap-2 text-guard-orange bg-guard-orangeLight border border-guard-orange/30 rounded-xl p-3.5 font-bold">
                         <PauseCircle className="h-6 w-6 text-guard-orange shrink-0" />
                         <div>
-                          <span className="text-sm block text-dark-text">Flagged for Review</span>
-                          <span className="text-xs font-normal text-dark-muted">Medium risk — an analyst can suspend it, or an admin can resolve it directly.</span>
+                          <span className="text-sm block text-dark-text">Awaiting User Authentication</span>
+                          <span className="text-xs font-normal text-dark-muted">Medium risk — the customer has 15 minutes to authenticate, otherwise the system auto-blocks it. Analysts no longer flag transactions.</span>
                         </div>
                       </div>
-                      {!isAdmin && (
-                        <button
-                          onClick={() => handleSuspendFlagged(
-                            predictionResult.transaction_id,
-                            (row) => setPredictionResult((prev: any) => prev ? { ...prev, status: row.status, claimed_by: row.claimed_by, claimed_at: row.claimed_at } : prev)
-                          )}
-                          disabled={isSuspending || !predictionResult.transaction_id}
-                          className="inline-flex items-center gap-1.5 text-xs font-bold px-4 py-3.5 rounded-xl bg-guard-orange text-white border border-guard-orange hover:bg-guard-orange/90 transition disabled:opacity-50 whitespace-nowrap shrink-0"
-                        >
-                          {isSuspending ? <Loader2 className="h-4 w-4 animate-spin" /> : <PauseCircle className="h-4 w-4" />}
-                          {isSuspending ? "Suspending..." : "Suspend Transaction"}
-                        </button>
-                      )}
                     </>
                   ) : predictionResult.status === "SUSPENDED" ? (
                     <div className="flex-1 flex items-center gap-2 text-guard-orange bg-guard-orangeLight border border-guard-orange/30 rounded-xl p-3.5 font-bold">
@@ -509,7 +471,7 @@ export const TransactionAnalyzer: React.FC = () => {
 
                 {(predictionResult.status === "SUSPENDED" || (predictionResult.status === "PENDING" && isAdmin)) && (
                   <p className="text-[11px] text-dark-muted -mt-3 px-1">
-                    Head to <span className="font-semibold text-dark-text">Live Monitor</span> to {predictionResult.status === "PENDING" ? "flag or resolve" : "resolve"} this transaction.
+                    Head to <span className="font-semibold text-dark-text">Live Monitor</span> to resolve this transaction.
                   </p>
                 )}
 
@@ -689,7 +651,7 @@ export const TransactionAnalyzer: React.FC = () => {
                     ) : (
                       <ShieldCheck className="h-5 w-5" />
                     )}
-                    {manualResult.status === "PENDING" ? "FLAGGED FOR REVIEW" : manualResult.status === "SUSPENDED" ? "SUSPENDED — PENDING REVIEW" : manualResult.prediction === 1 ? "FRAUD DETECTED" : "GENUINE TRANSACTION"}
+                    {manualResult.status === "PENDING" ? "AWAITING USER AUTH" : manualResult.status === "SUSPENDED" ? "SUSPENDED — PENDING REVIEW" : manualResult.prediction === 1 ? "FRAUD DETECTED" : "GENUINE TRANSACTION"}
                   </span>
                 </div>
                 <div>
@@ -698,21 +660,12 @@ export const TransactionAnalyzer: React.FC = () => {
                     Score: {manualResult.risk_score}/100 ({manualResult.risk_level})
                   </span>
                 </div>
-                {/* Analyst-only: suspend a medium-risk (PENDING) result in place */}
+                {/* MEDIUM (PENDING) is a customer-auth hold: not analyst work. */}
                 {manualResult.status === "PENDING" && !isAdmin && (
                   <div className="md:col-span-2 flex items-center gap-3">
-                    <button
-                      onClick={() => handleSuspendFlagged(
-                        manualResult.transaction_id,
-                        (row) => setManualResult((prev: any) => prev ? { ...prev, status: row.status, claimed_by: row.claimed_by, claimed_at: row.claimed_at } : prev)
-                      )}
-                      disabled={isSuspending || !manualResult.transaction_id}
-                      className="inline-flex items-center gap-1.5 text-xs font-bold px-4 py-2.5 rounded-lg bg-guard-orange text-white border border-guard-orange hover:bg-guard-orange/90 transition disabled:opacity-50 whitespace-nowrap"
-                    >
-                      {isSuspending ? <Loader2 className="h-4 w-4 animate-spin" /> : <PauseCircle className="h-4 w-4" />}
-                      {isSuspending ? "Suspending..." : "Suspend Transaction"}
-                    </button>
-                    <span className="text-xs text-dark-muted">Medium risk — flagged under your name for admin review.</span>
+                    <span className="text-[11px] font-semibold text-dark-muted">
+                      Medium risk — awaiting the customer's authentication (OTP / biometric). The system auto-blocks it if not cleared within 15 minutes.
+                    </span>
                   </div>
                 )}
                 {manualResult.status === "SUSPENDED" && manualResult.claimed_by && (

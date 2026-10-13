@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
 from backend.app.repositories.transaction_repository import db_repo
 from backend.app.schemas.transaction import (
-    ResolveTransactionRequest, BulkSuspendRequest, BulkResolveRequest
+    ResolveTransactionRequest, BulkResolveRequest
 )
 from backend.app.auth import require_admin, get_current_user
 import json
@@ -197,40 +197,6 @@ def export_transactions_csv(
     )
 
 
-@router.patch("/transactions/{txn_id}/suspend")
-def suspend_transaction(
-    txn_id: str,
-    current_user: dict = Depends(get_current_user)
-):
-    """Any signed-in user (analyst or admin) can flag a PENDING (medium-risk)
-    transaction. This is a deliberate action, not automatic: it moves the
-    transaction to SUSPENDED and records who flagged it, in one step, so
-    everyone (on any device) can see it's now being handled and by whom.
-    Resolving it afterward still requires admin via PATCH /transactions/{txn_id}/resolve."""
-    try:
-        result = db_repo.suspend_transaction(txn_id, flagged_by_email=current_user["email"])
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to suspend transaction: {str(e)}")
-
-    if result.get("error") == "not_found":
-        raise HTTPException(status_code=404, detail="Transaction not found.")
-    if result.get("error") == "auth_required":
-        raise HTTPException(
-            status_code=400,
-            detail="This transaction is awaiting customer authentication and cannot be flagged.",
-        )
-    if result.get("error") == "not_pending":
-        raise HTTPException(status_code=400, detail="Only a PENDING transaction can be suspended.")
-
-    if isinstance(result.get("triggered_rules"), str):
-        try:
-            result["triggered_rules"] = json.loads(result["triggered_rules"])
-        except Exception:
-            result["triggered_rules"] = []
-
-    return result
-
-
 @router.patch("/transactions/{txn_id}/resolve")
 def resolve_transaction(
     txn_id: str,
@@ -268,10 +234,11 @@ def authenticate_transaction(
     current_user: dict = Depends(get_current_user)
 ):
     """Simulate the customer clearing a 'awaiting user authentication' hold
-    (MEDIUM 40-45): in production the customer confirms via OTP/biometric in
-    their banking app; here any signed-in operator can trigger it from the
-    dashboard. Only a PENDING USER_AUTH row can be cleared - it becomes
-    APPROVED. Without this, the timeout sweep blocks it after 15 minutes."""
+    (any MEDIUM transaction): in production the customer confirms via
+    OTP/biometric in their banking app; here any signed-in operator can
+    trigger it from the dashboard. Only a PENDING USER_AUTH row can be
+    cleared - it becomes APPROVED. Without this, the timeout sweep blocks it
+    after 15 minutes."""
     try:
         result = db_repo.authenticate_transaction(txn_id)
     except Exception as e:
@@ -291,25 +258,6 @@ def authenticate_transaction(
             result["triggered_rules"] = []
 
     return result
-
-
-@router.post("/transactions/bulk-suspend")
-def bulk_suspend_transactions(
-    payload: BulkSuspendRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    """Analyst batch-flag: same semantics as the single suspend, per row -
-    PENDING -> SUSPENDED with claimed_by stamped to this user. Rows that are
-    missing or no longer PENDING are reported as failures, not errors, so one
-    stale id never rolls back the rest of the batch."""
-    succeeded, failed = [], []
-    for txn_id in payload.transaction_ids:
-        result = db_repo.suspend_transaction(txn_id, flagged_by_email=current_user["email"])
-        if "error" in result:
-            failed.append({"transaction_id": txn_id, "reason": result["error"]})
-        else:
-            succeeded.append(txn_id)
-    return {"succeeded": succeeded, "failed": failed}
 
 
 @router.post("/transactions/bulk-resolve")
@@ -364,9 +312,9 @@ def run_auto_resolve(current_user: dict = Depends(get_current_user)):
     """Auth-timeout sweep trigger - cheap enough for the dashboard's 10s poll:
     the server only executes the sweep once per minute (throttled below), all
     other calls return {'skipped': true} instantly. Policy: an unauthenticated
-    USER_AUTH hold (MEDIUM 40-45) past its 15-minute lifespan is BLOCKED as
-    'system:auth-timeout'. The sweep never auto-approves, and SUSPENDED or
-    customer-authenticated rows are never touched."""
+    USER_AUTH hold (any MEDIUM transaction) past its 15-minute lifespan is
+    BLOCKED as 'system:auth-timeout'. The sweep never auto-approves, and
+    SUSPENDED or customer-authenticated rows are never touched."""
     global _LAST_AUTO_RESOLVE_RUN
     now = time.time()
     if now - _LAST_AUTO_RESOLVE_RUN < AUTO_RESOLVE_MIN_INTERVAL_S:

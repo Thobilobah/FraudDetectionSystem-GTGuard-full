@@ -40,7 +40,12 @@ _PLACEHOLDER_RE = re.compile(r"\?")
 # (account_suspend_requests / blocked_accounts). The HIGH-risk transaction is
 # never modified: it stays auto-BLOCKED while an analyst files a request for
 # the admin to approve or decline.
-SCHEMA_VERSION = "6"
+# v7: the customer-authentication hold (required_action='USER_AUTH') extends
+# to the WHOLE MEDIUM band (was the bottom 40-45 only) - analysts no longer
+# flag MEDIUM transactions; the backfill below marks any still-open PENDING
+# MEDIUM row awaiting user auth, and the 15-minute sweep then auto-blocks the
+# stale ones.
+SCHEMA_VERSION = "7"
 
 # Cap how many historical rows feature engineering will load per queried
 # user/beneficiary. Bounded windows keep prediction latency flat as the
@@ -356,9 +361,10 @@ class TransactionRepository:
                     WHERE model_prediction IS NULL
                 """)
                 # Backfill the customer-authentication gate for rows written
-                # before required_action existed: any still-open MEDIUM hold in
-                # the 40-45 band awaits user authentication. WHERE IS NULL keeps
-                # the whole step idempotent.
+                # before required_action existed (or before the hold covered
+                # the whole MEDIUM band): any still-open MEDIUM hold awaits
+                # user authentication. WHERE IS NULL keeps the whole step
+                # idempotent; the 15-minute sweep auto-blocks stale ones.
                 conn.execute("""
                     UPDATE transactions
                     SET required_action = 'USER_AUTH'
@@ -487,10 +493,10 @@ class TransactionRepository:
                          latitude: float, longitude: float, is_fraud: int,
                          prob: float, score: int, level: str, rules: list,
                          payment_method: str = "USSD", status: str = "APPROVED") -> dict:
-        # Customer-authentication gate: a MEDIUM hold in the bottom of the band
-        # (score <= AUTH_REQUIRED_MAX_SCORE, i.e. 40-45) is not analyst work -
-        # it awaits the customer's own authentication and auto-blocks if they
-        # don't respond within AUTH_LIFESPAN_MIN (see run_auth_timeout_sweep).
+        # Customer-authentication gate: every MEDIUM hold (the whole 40-69
+        # band) is not analyst work - it awaits the customer's own
+        # authentication and auto-blocks if they don't respond within
+        # AUTH_LIFESPAN_MIN (see run_auth_timeout_sweep).
         required_action = (
             "USER_AUTH"
             if level == "MEDIUM" and score is not None
@@ -589,43 +595,6 @@ class TransactionRepository:
             "claimed_at": None,
             "required_action": required_action
         }
-
-    def suspend_transaction(self, txn_id: str, flagged_by_email: str) -> dict:
-        """An analyst flags a PENDING (medium-risk) transaction, which does two
-        things in one atomic action: moves its status to SUSPENDED, and records
-        that analyst's email as who flagged it - so it's visible to everyone
-        else (including on a different login/device) that this one is now
-        being handled, and by whom. Returns a dict with an 'error' key on
-        failure so the route can translate it into the right HTTP status, or
-        the updated row on success."""
-        with self.get_connection() as conn:
-            claimed_at = datetime.now().isoformat()
-            # Atomic claim: the status='PENDING' guard inside the UPDATE makes
-            # the check-and-set race-free. Two analysts suspending the same
-            # transaction concurrently cannot both claim it - only one UPDATE
-            # matches, the other affects 0 rows and falls through below.
-            cursor = conn.execute("""
-                UPDATE transactions
-                SET status = 'SUSPENDED', claimed_by = ?, claimed_at = ?
-                WHERE transaction_id = ? AND status = 'PENDING'
-                  AND (required_action IS NULL OR required_action <> 'USER_AUTH')
-                RETURNING *
-            """, (flagged_by_email, claimed_at, txn_id))
-            updated = cursor.fetchone()
-            conn.commit()
-
-            if updated:
-                return dict(updated)
-
-            # No row was updated: it either doesn't exist, is already handled,
-            # or is a customer-authentication hold that analysts must not flag.
-            cursor = conn.execute("SELECT * FROM transactions WHERE transaction_id = ?", (txn_id,))
-            row = cursor.fetchone()
-            if not row:
-                return {"error": "not_found"}
-            if row["status"] == "PENDING" and row.get("required_action") == "USER_AUTH":
-                return {"error": "auth_required"}
-            return {"error": "not_pending"}
 
     def resolve_transaction(self, txn_id: str, decision: str, resolved_by: str) -> dict | None:
         """Admin resolves a PENDING or SUSPENDED transaction to APPROVED or BLOCKED."""
@@ -908,36 +877,44 @@ class TransactionRepository:
 
     def queue_metrics(self) -> dict:
         """Backlog/throughput stats for the admin Review Queue strip and the
-        dashboard badge. One round-trip: pending depth + age, review counts,
-        and median minutes from creation to decision over the last 24h
-        (created_at/resolved_at are naive-ISO TEXT, cast in SQL)."""
+        dashboard badge, sourced from the analyst-requested account-suspension
+        workflow (analysts no longer flag individual transactions). One
+        round-trip: pending request depth + age, admin decision counts, and
+        median minutes from request to decision over the last 24h
+        (requested_at/reviewed_at are naive-ISO TEXT, cast in SQL)."""
         cutoff_24h = (datetime.now() - timedelta(hours=24)).isoformat()
         with self.get_connection() as conn:
             cursor = conn.execute("""
-                SELECT COUNT(*) AS pending, MIN(created_at) AS oldest
-                FROM transactions WHERE status = 'SUSPENDED'
-            """)
-            pend = cursor.fetchone()
-            cursor = conn.execute("""
                 SELECT
-                    COUNT(*) FILTER (WHERE status IN ('APPROVED', 'BLOCKED')) AS completed_total,
-                    COUNT(*) FILTER (WHERE resolved_at IS NOT NULL) AS resolved_total,
-                    COUNT(*) FILTER (WHERE resolved_at >= ?) AS resolved_24h,
-                    COUNT(*) FILTER (WHERE resolved_by IN ('system:policy', 'system:auth-timeout') AND resolved_at >= ?) AS auto_24h
-                FROM transactions
-            """, (cutoff_24h, cutoff_24h))
+                    COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
+                    MIN(requested_at) FILTER (WHERE status = 'PENDING') AS oldest,
+                    COUNT(*) FILTER (WHERE status IN ('APPROVED', 'DECLINED')) AS completed_total,
+                    COUNT(*) FILTER (WHERE reviewed_at IS NOT NULL) AS resolved_total,
+                    COUNT(*) FILTER (WHERE status IN ('APPROVED', 'DECLINED') AND reviewed_at >= ?) AS decided_24h
+                FROM account_suspend_requests
+            """, (cutoff_24h,))
             agg = cursor.fetchone()
             cursor = conn.execute("""
                 SELECT COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (
-                    ORDER BY EXTRACT(EPOCH FROM (resolved_at::timestamp - created_at::timestamp)) / 60.0
+                    ORDER BY EXTRACT(EPOCH FROM (reviewed_at::timestamp - requested_at::timestamp)) / 60.0
                 ), 0) AS median_min
-                FROM transactions
-                WHERE resolved_at IS NOT NULL AND resolved_at >= ?
+                FROM account_suspend_requests
+                WHERE reviewed_at IS NOT NULL AND reviewed_at >= ?
             """, (cutoff_24h,))
             median_min = cursor.fetchone()["median_min"]
+            # Auto-system decisions (auth-timeout / policy blocks and the
+            # customer's own authentication) are transaction-side outcomes,
+            # kept so the admins' throughput tile still shows automation.
+            cursor = conn.execute("""
+                SELECT COUNT(*) AS auto_24h
+                FROM transactions
+                WHERE resolved_at >= ?
+                  AND resolved_by IN ('system:policy', 'system:auth-timeout')
+            """, (cutoff_24h,))
+            auto = cursor.fetchone()
 
         oldest_minutes = 0.0
-        oldest = pend["oldest"]
+        oldest = agg["oldest"]
         if oldest:
             try:
                 ts = oldest if isinstance(oldest, datetime) else datetime.fromisoformat(str(oldest))
@@ -945,12 +922,12 @@ class TransactionRepository:
             except ValueError:
                 pass
         return {
-            "pending": int(pend["pending"] or 0),
+            "pending": int(agg["pending"] or 0),
             "oldest_pending_minutes": round(oldest_minutes, 1),
             "completed_total": int(agg["completed_total"] or 0),
             "resolved_total": int(agg["resolved_total"] or 0),
-            "resolved_24h": int(agg["resolved_24h"] or 0),
-            "auto_resolved_24h": int(agg["auto_24h"] or 0),
+            "resolved_24h": int(agg["decided_24h"] or 0),
+            "auto_resolved_24h": int(auto["auto_24h"] or 0),
             "median_resolve_minutes": round(float(median_min or 0), 1),
         }
 
@@ -1171,12 +1148,13 @@ class TransactionRepository:
         }
 
     def run_auth_timeout_sweep(self) -> dict:
-        """Customer-authentication timeout sweep. A USER_AUTH hold (MEDIUM
-        bottom band, 40-45) that is still PENDING and unclaimed past its
-        AUTH_LIFESPAN_MIN window auto-BLOCKS: the customer never authenticated,
-        so the funds are held back. The final UPDATE re-asserts PENDING +
-        required_action='USER_AUTH', so a row that gets authenticated (or
-        admin-resolved) between our SELECT and UPDATE is never clobbered.
+        """Customer-authentication timeout sweep. A USER_AUTH hold (any
+        MEDIUM transaction - the whole 40-69 band) that is still PENDING and
+        unclaimed past its AUTH_LIFESPAN_MIN window auto-BLOCKS: the customer
+        never authenticated, so the funds are held back. The final UPDATE
+        re-asserts PENDING + required_action='USER_AUTH', so a row that gets
+        authenticated (or admin-resolved) between our SELECT and UPDATE is
+        never clobbered.
         Decisions are stamped resolved_by='system:auth-timeout'."""
         if not settings.AUTO_RESOLVE_ENABLED:
             return {"enabled": False, "candidates": 0, "blocked": 0, "resolved": 0, "ids": []}

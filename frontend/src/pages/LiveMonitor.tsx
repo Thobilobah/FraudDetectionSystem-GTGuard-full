@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { Transaction, AccountSuspendRequest } from "../types";
-import { resolveTransaction, suspendTransaction, bulkSuspendTransactions, authenticateTransaction, getStoredUser, getTransactionsPage, createSuspendRequest, getSuspendRequests } from "../services/api";
+import { resolveTransaction, authenticateTransaction, getStoredUser, getTransactionsPage, createSuspendRequest, getSuspendRequests } from "../services/api";
 import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search, Fingerprint, Clock, Send, X } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
@@ -17,9 +17,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   const [selectedTxn, setSelectedTxn] = useState<Transaction | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
-  const [claimingId, setClaimingId] = useState<string | null>(null);
   const [authingId, setAuthingId] = useState<string | null>(null);
-  const [claimError, setClaimError] = useState<string | null>(null);
   // Server-side pagination of the ledger, mirroring TransactionHistory. The
   // monitor no longer renders the shared 100-row poll cache; it fetches only
   // the active page (newest-first) and keeps refreshing it silently on a 10s
@@ -37,10 +35,6 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   const firstLoadDone = useRef(false);
   const currentUser = getStoredUser();
   const isAdmin = currentUser?.role === "admin";
-  // Analyst bulk-suspend: multi-select PENDING rows, then one batch call.
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [bulkConfirm, setBulkConfirm] = useState(false);
-  const [bulkBusy, setBulkBusy] = useState(false);
 
   // Account-suspension workflow: analysts raise a request against the sender
   // account of a HIGH-risk (auto-BLOCKED) transaction, with a recommendation
@@ -121,62 +115,6 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
     setPage(0);
   };
 
-  // Drop selections for rows that left PENDING (resolved, suspended by a
-  // colleague, or rolled to the next page) so the toolbar count is always true.
-  useEffect(() => {
-    setSelectedIds((prev) => {
-      if (prev.size === 0) return prev;
-      const pendingNow = new Set(
-        rows.filter((r) => r.status === "PENDING" && r.required_action !== "USER_AUTH").map((r) => r.transaction_id)
-      );
-      const next = new Set([...prev].filter((id) => pendingNow.has(id)));
-      return next.size === prev.size ? prev : next;
-    });
-  }, [rows]);
-
-  const toggleSelect = (txnId: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(txnId)) next.delete(txnId);
-      else next.add(txnId);
-      return next;
-    });
-    setBulkConfirm(false);
-  };
-
-  const toggleSelectAllPending = () => {
-    const pendingOnPage = rows.filter((r) => r.status === "PENDING" && r.required_action !== "USER_AUTH").map((r) => r.transaction_id);
-    const allSelected = pendingOnPage.length > 0 && pendingOnPage.every((id) => selectedIds.has(id));
-    setSelectedIds(allSelected ? new Set() : new Set(pendingOnPage));
-    setBulkConfirm(false);
-  };
-
-  const handleBulkSuspend = async () => {
-    if (selectedIds.size === 0 || bulkBusy) return;
-    setBulkBusy(true);
-    try {
-      const result = await bulkSuspendTransactions([...selectedIds]);
-      const failedCount = result.failed.length;
-      showToast(
-        "suspended",
-        `${result.succeeded.length} transaction${result.succeeded.length === 1 ? "" : "s"} suspended`,
-        failedCount > 0
-          ? `${failedCount} skipped (already actioned or not found).`
-          : "Flagged under your name, pending admin review."
-      );
-      setSelectedIds(new Set());
-      setBulkConfirm(false);
-      await reloadCurrentPage();
-      void onRefresh();
-    } catch (e: any) {
-      console.error("Bulk suspend failed:", e);
-      const detail = e?.response?.data?.detail;
-      showToast("danger", "Bulk suspend failed", typeof detail === "string" ? detail : "Could not suspend the selected transactions.");
-    } finally {
-      setBulkBusy(false);
-    }
-  };
-
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
@@ -206,29 +144,6 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
       showToast("danger", "Action failed", "Could not resolve this transaction. Please try again.");
     } finally {
       setResolvingId(null);
-    }
-  };
-
-  const handleSuspend = async (txnId: string) => {
-    setClaimingId(txnId);
-    setClaimError(null);
-    try {
-      const updated = await suspendTransaction(txnId);
-      if (selectedTxn?.transaction_id === txnId) {
-        setSelectedTxn({ ...selectedTxn, ...updated });
-      }
-      showToast("suspended", "Transaction suspended", `${txnId} is now flagged under your name, pending admin review.`);
-      await reloadCurrentPage();
-      void onRefresh();
-    } catch (e: any) {
-      // Most likely a 400: someone else already suspended it a moment before
-      // this click landed (it's no longer PENDING). Surface that clearly.
-      const detail = e?.response?.data?.detail;
-      setClaimError(detail || "Could not suspend this transaction. It may have already been handled.");
-      await reloadCurrentPage();
-      void onRefresh();
-    } finally {
-      setClaimingId(null);
     }
   };
 
@@ -337,18 +252,14 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   };
 
   // ACTION cell: LOW -> plain "Approved" label, HIGH -> plain "Blocked" label.
-  // MEDIUM starts as PENDING (nobody has acted on it yet):
-  //   - admins can resolve it immediately (Approve/Block), bypassing analysts entirely
-  //   - analysts get a "Suspend Transaction" button - clicking it is a deliberate
-  //     flag: it moves the transaction to SUSPENDED and records their email as
-  //     who flagged it, in one action.
-  // Once SUSPENDED, admins keep their Approve/Block buttons (now alongside the
-  // flagged-by icon), and analysts see a read-only icon - clicking it (or the
-  // row) reveals who flagged it in the detail panel, rather than spelling the
-  // email out in the table itself.
+  // MEDIUM is a customer-authentication hold: PENDING/USER_AUTH while the
+  // customer is given 15 minutes to authenticate.
+  //   - analysts see a read-only "Awaiting user auth" badge - it is NOT
+  //     analyst work, there is no flag/suspend action anymore
+  //   - admins can override immediately (Approve/Block), or let the customer
+  //     authenticate and the timeout sweep do its job
   const getActionCell = (txn: Transaction) => {
     const isBusy = resolvingId === txn.transaction_id;
-    const isSuspending = claimingId === txn.transaction_id;
     const isFlagged = !!txn.claimed_by;
 
     const flaggedIcon = (
@@ -397,15 +308,12 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
 
     if (txn.status === "PENDING") {
       if (isAdmin) return resolveButtons;
+      // PENDING outside the auth hold should not happen after the MEDIUM
+      // backfill; keep a read-only label just in case legacy rows remain.
       return (
-        <button
-          disabled={isSuspending}
-          onClick={(e) => { e.stopPropagation(); handleSuspend(txn.transaction_id); }}
-          className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-md bg-guard-orangeLight text-guard-orange border border-guard-orange/30 hover:bg-guard-orange/20 transition disabled:opacity-50"
-        >
-          {isSuspending ? <Loader2 className="h-3 w-3 animate-spin" /> : <PauseCircle className="h-3 w-3" />}
-          {isSuspending ? "Suspending..." : "Suspend Transaction"}
-        </button>
+        <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-md bg-brand-info/10 text-brand-info border border-brand-info/30 whitespace-nowrap">
+          <Clock className="h-3 w-3" /> Pending
+        </span>
       );
     }
 
@@ -457,12 +365,6 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
 
   return (
     <div className="space-y-6">
-      {claimError && (
-        <div className="bg-brand-danger/10 border border-brand-danger/30 text-brand-danger text-xs font-semibold rounded-lg px-4 py-3 flex items-center justify-between">
-          <span>{claimError}</span>
-          <button onClick={() => setClaimError(null)} className="text-brand-danger/70 hover:text-brand-danger font-bold px-2">✕</button>
-        </div>
-      )}
       {/* Title Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -526,74 +428,11 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
             </form>
           </div>
 
-          {/* Analyst bulk-suspend toolbar (appears once rows are selected) */}
-          {!isAdmin && selectedIds.size > 0 && (
-            <div className="px-4 py-2.5 border-b border-dark-border bg-guard-orangeLight/40 flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs font-bold text-guard-orange">
-                {selectedIds.size} PENDING transaction{selectedIds.size === 1 ? "" : "s"} selected
-              </span>
-              <div className="flex items-center gap-2">
-                {bulkConfirm ? (
-                  <>
-                    <span className="text-xs font-semibold text-dark-text">
-                      Flag all {selectedIds.size} under your name?
-                    </span>
-                    <button
-                      onClick={handleBulkSuspend}
-                      disabled={bulkBusy}
-                      className="inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-md bg-guard-orange text-white hover:bg-guard-orange/90 transition disabled:opacity-50"
-                    >
-                      {bulkBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PauseCircle className="h-3.5 w-3.5" />}
-                      {bulkBusy ? "Suspending..." : "Confirm"}
-                    </button>
-                    <button
-                      onClick={() => setBulkConfirm(false)}
-                      disabled={bulkBusy}
-                      className="text-xs font-bold px-3 py-1.5 rounded-md bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition"
-                    >
-                      Cancel
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={() => setBulkConfirm(true)}
-                      disabled={bulkBusy}
-                      className="inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-md bg-guard-orange text-white hover:bg-guard-orange/90 transition disabled:opacity-50"
-                    >
-                      <PauseCircle className="h-3.5 w-3.5" /> Suspend selected ({selectedIds.size})
-                    </button>
-                    <button
-                      onClick={() => setSelectedIds(new Set())}
-                      className="text-xs font-bold px-3 py-1.5 rounded-md bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition"
-                    >
-                      Clear
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-
           <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
             {rows.length > 0 || isLoading ? (
               <table className="w-full text-left border-collapse">
                 <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider sticky top-0">
                   <tr>
-                    {!isAdmin && (
-                      <th className="px-3 py-3 w-8">
-                        <input
-                          type="checkbox"
-                          aria-label="Select all pending rows on this page"
-                          checked={
-                            rows.filter((r) => r.status === "PENDING" && r.required_action !== "USER_AUTH").length > 0 &&
-                            rows.filter((r) => r.status === "PENDING" && r.required_action !== "USER_AUTH").every((r) => selectedIds.has(r.transaction_id))
-                          }
-                          onChange={toggleSelectAllPending}
-                          className="accent-guard-orange align-middle"
-                        />
-                      </th>
-                    )}
                     <th className="px-3 py-3">Txn ID</th>
                     <th className="px-3 py-3">User</th>
                     <th className="px-3 py-3">Amount</th>
@@ -606,7 +445,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                 <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
                   {isLoading && rows.length === 0 && (
                     <tr>
-                      <td colSpan={isAdmin ? 7 : 8} className="px-3 py-12 text-center">
+                      <td colSpan={7} className="px-3 py-12 text-center">
                         <Loader2 className="h-6 w-6 animate-spin text-guard-orange mx-auto" />
                         <p className="text-xs text-dark-muted mt-2">Loading stream…</p>
                       </td>
@@ -622,19 +461,6 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                         selectedTxn?.transaction_id === txn.transaction_id ? "bg-guard-orangeLight/40 border-l-4 border-l-guard-orange" : ""
                       } ${txn.status === "SUSPENDED" ? "bg-guard-orangeLight/60" : ""} ${isAuthHold(txn) ? "bg-brand-warning/5" : txn.status === "PENDING" ? "bg-brand-info/5" : ""}`}
                     >
-                      {!isAdmin && (
-                        <td className="px-3 py-3.5" onClick={(e) => e.stopPropagation()}>
-                          {txn.status === "PENDING" && txn.required_action !== "USER_AUTH" ? (
-                            <input
-                              type="checkbox"
-                              aria-label={`Select ${txn.transaction_id}`}
-                              checked={selectedIds.has(txn.transaction_id)}
-                              onChange={() => toggleSelect(txn.transaction_id)}
-                              className="accent-guard-orange align-middle"
-                            />
-                          ) : null}
-                        </td>
-                      )}
                       <td className="px-3 py-3.5 text-xs font-semibold text-dark-text">
                         {txn.transaction_id}
                       </td>
@@ -756,15 +582,15 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                 )}
               </div>
 
-              {/* Suspended/Pending: admin resolve panel, analyst suspend action,
-                  or the customer-auth hold (MEDIUM 40-45) */}
+              {/* Pending/Suspended: admin resolve panel, the customer-auth hold
+                  (any MEDIUM transaction), or the admin-only suspended review */}
               {(selectedTxn.status === "SUSPENDED" || selectedTxn.status === "PENDING") && (
                 isAuthHold(selectedTxn) ? (
                   <div className="bg-brand-warning/10 border border-brand-warning/30 rounded-lg p-4 space-y-3">
                     <p className="text-xs text-brand-warning font-semibold leading-relaxed flex items-start gap-1.5">
                       <Clock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                       <span>
-                        This medium-risk transaction (40-45%) is awaiting the customer's
+                        This medium-risk transaction is awaiting the customer's
                         authentication (OTP / biometric). Analysts cannot flag it. If it is not
                         authenticated within 15 minutes, the system blocks it automatically.
                       </span>
@@ -800,7 +626,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                   <div className="bg-guard-orangeLight border border-guard-orange/30 rounded-lg p-4 space-y-3">
                     <p className="text-xs text-guard-orange font-semibold leading-relaxed">
                       {selectedTxn.status === "PENDING"
-                        ? "This transaction is medium risk and awaiting action. An analyst can flag it for review, or an admin can resolve it directly."
+                        ? "This transaction is being reviewed. Only an admin can resolve it directly - analysts no longer flag transactions."
                         : "This transaction is held pending review. Funds will not move until an admin approves or blocks it."}
                     </p>
                     {isAdmin ? (
@@ -820,15 +646,6 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                           Block Transaction
                         </button>
                       </div>
-                    ) : selectedTxn.status === "PENDING" ? (
-                      <button
-                        disabled={claimingId === selectedTxn.transaction_id}
-                        onClick={() => handleSuspend(selectedTxn.transaction_id)}
-                        className="w-full bg-guard-orange text-white text-xs font-bold py-2 rounded-lg hover:bg-guard-orange/90 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
-                      >
-                        {claimingId === selectedTxn.transaction_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PauseCircle className="h-3.5 w-3.5" />}
-                        {claimingId === selectedTxn.transaction_id ? "Suspending..." : "Suspend Transaction"}
-                      </button>
                     ) : (
                       <p className="text-[11px] text-guard-orange/80 font-medium italic">
                         Only an admin account can resolve this. Sign in with an admin email to take action.
