@@ -1,9 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import type { ModelMetadata, ModelComparison, FeatureImportance } from "../types";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
-import { Award, Zap, Database, Users, RefreshCw, BarChart3 } from "lucide-react";
+import { Award, Zap, Database, BarChart3 } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
-import { getFeedbackConfusionMatrix, type FeedbackConfusionMatrix } from "../services/api";
 import { ConfusionMatrix } from "../components/ConfusionMatrix";
 
 interface ModelPerformanceProps {
@@ -24,30 +23,6 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
   const { theme } = useTheme();
   const gridStroke = theme === "dark" ? "#292C33" : "#E5E7EB";
   const axisStroke = "#9CA3AF";
-
-  // Live matrix: model predictions vs analyst verdicts (admin endpoint).
-  const [fb, setFb] = useState<FeedbackConfusionMatrix | null>(null);
-  const [fbState, setFbState] = useState<"loading" | "ok" | "forbidden" | "error">("loading");
-  const [fbTick, setFbTick] = useState(0);
-
-  useEffect(() => {
-    let mounted = true;
-    setFbState("loading");
-    getFeedbackConfusionMatrix()
-      .then((d) => {
-        if (mounted) {
-          setFb(d);
-          setFbState("ok");
-        }
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        setFbState(err?.response?.status === 403 ? "forbidden" : "error");
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [fbTick]);
 
   const formatPercent = (val: number) => `${(val * 100).toFixed(1)}%`;
 
@@ -128,73 +103,6 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
               f1={modelMeta.metrics.f1}
             />
           </div>
-        )}
-      </div>
-
-      {/* Live analyst-feedback confusion matrix: human decisions as ground
-          truth vs the model's snapshot prediction — reviewers drive these
-          numbers. Admin-backed; everyone still sees the validation matrix. */}
-      <div className="bg-dark-card border border-dark-border p-5 rounded-xl shadow-glow-brand">
-        <div className="flex items-center gap-2 mb-4">
-          <div className="p-2 rounded bg-guard-orangeLight text-guard-orange">
-            <Users className="h-5 w-5" />
-          </div>
-          <div className="flex-1">
-            <h3 className="text-base font-semibold text-dark-text">Confusion Matrix (Live Analyst Feedback)</h3>
-            <p className="text-xs text-dark-muted">
-              Model verdict vs the human decision — every analyst-resolved transaction in history (policy auto-resolves excluded)
-            </p>
-          </div>
-          <button
-            onClick={() => setFbTick((t) => t + 1)}
-            disabled={fbState === "loading"}
-            className="flex items-center gap-1.5 text-xs font-semibold text-dark-muted hover:text-dark-text border border-dark-border rounded-lg px-2.5 py-1.5 transition disabled:opacity-50"
-            title="Refresh"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${fbState === "loading" ? "animate-spin" : ""}`} />
-            Refresh
-          </button>
-        </div>
-
-        {fbState === "loading" && (
-          <div className="h-40 flex items-center justify-center text-dark-muted text-xs">
-            Loading analyst feedback…
-          </div>
-        )}
-        {fbState === "forbidden" && (
-          <div className="h-24 flex items-center justify-center text-dark-muted text-xs text-center px-6">
-            The live analyst-feedback matrix is admin-only. The validation-split
-            matrix above is shown for everyone.
-          </div>
-        )}
-        {fbState === "error" && (
-          <div className="h-40 flex items-center justify-center text-dark-muted text-xs">
-            Feedback matrix unavailable right now.
-          </div>
-        )}
-        {fbState === "ok" && fb && fb.total === 0 && (
-          <div className="h-40 flex items-center justify-center text-dark-muted text-xs text-center px-6">
-            No analyst-resolved transactions yet — resolve rows in the Review
-            Queue and their verdicts will appear here as ground truth.
-          </div>
-        )}
-        {fbState === "ok" && fb && fb.total > 0 && (
-          <>
-            <ConfusionMatrix
-              tn={fb.tn}
-              fp={fb.fp}
-              fn={fb.fn}
-              tp={fb.tp}
-              accuracy={fb.accuracy}
-              precision={fb.precision}
-              recall={fb.recall}
-              f1={fb.f1}
-            />
-
-            <p className="text-[10px] text-dark-muted text-center mt-4">
-              Based on {fb.total} human decision{fb.total === 1 ? "" : "s"} · {fb.analyst_flagged} analyst-flagged
-            </p>
-          </>
         )}
       </div>
 
