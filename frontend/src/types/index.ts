@@ -92,6 +92,14 @@ export interface WatchlistedAccount {
   active: number;
 }
 
+/** Fraud concentration at a Nigerian state capital (Threat Heatmap). */
+export interface HeatmapPoint {
+  name: string;
+  state: string;
+  total: number;
+  fraud: number;
+}
+
 export interface ModelMetrics {
   accuracy: number;
   precision: number;

@@ -79,3 +79,14 @@ def get_analytics():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/analytics/heatmap")
+def get_fraud_heatmap():
+    """Fraud-transaction counts bucketed to the nearest Nigerian state
+    capital, for the Threat Heatmap. Transactions without coordinates are
+    skipped."""
+    try:
+        return {"items": db_repo.get_fraud_heatmap()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

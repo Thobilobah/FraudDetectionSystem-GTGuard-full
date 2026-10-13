@@ -2,7 +2,7 @@ import axios from "axios";
 import type {
   Transaction, TransactionPage, AnalyticsResponse,
   AccountSuspendRequest, SuspendRequestPage, SuspendRequestSla, BlockedAccount,
-  WatchlistedAccount,
+  WatchlistedAccount, HeatmapPoint,
 } from "../types";
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -101,6 +101,12 @@ export const getFeatureExplanation = async () => {
 export const getAnalytics = async (): Promise<AnalyticsResponse> => {
   const response = await api.get("/analytics");
   return response.data;
+};
+
+/** Threat Heatmap: fraud counts bucketed to the nearest state capital. */
+export const getFraudHeatmap = async (): Promise<HeatmapPoint[]> => {
+  const response = await api.get("/analytics/heatmap");
+  return response.data.items ?? [];
 };
 
 export const getTransactions = async (limit = 100): Promise<Transaction[]> => {

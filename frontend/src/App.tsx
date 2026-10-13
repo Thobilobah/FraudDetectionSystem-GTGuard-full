@@ -9,10 +9,11 @@ import { ModelPerformance } from "./pages/ModelPerformance";
 import { TransactionHistory } from "./pages/TransactionHistory";
 import { SystemStatus } from "./pages/SystemStatus";
 import { ReviewQueue } from "./pages/ReviewQueue";
+import { ThreatHeatmap } from "./pages/ThreatHeatmap";
 import { Login } from "./pages/Login";
 import { 
   Shield, LayoutDashboard, Radio, Activity, BarChart2, History, Server,
-  Menu, X, AlertTriangle, ShieldCheck, LogOut, Moon, Sun, Inbox
+  Menu, X, AlertTriangle, ShieldCheck, LogOut, Moon, Sun, Inbox, Map as MapIcon
 } from "lucide-react";
 import { useTheme } from "./context/ThemeContext";
 
@@ -196,6 +197,8 @@ export default function App() {
         // renders the shared poll cache. onRefresh keeps the dashboard's
         // analytics + health fresh after local actions.
         return <LiveMonitor onRefresh={fetchAllData} />;
+      case "threatmap":
+        return <ThreatHeatmap />;
       case "analyzer":
         return <TransactionAnalyzer />;
       case "performance":
@@ -265,6 +268,14 @@ export default function App() {
               >
                 <Radio className="h-4.5 w-4.5" />
                 Live Monitor
+              </button>
+
+              <button
+                onClick={() => setActiveTab("threatmap")}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-semibold transition ${getActiveTabClass("threatmap")}`}
+              >
+                <MapIcon className="h-4.5 w-4.5" />
+                Threat Heatmap
               </button>
 
               {/* Admin-only: account-suspension requests analysts raised */}

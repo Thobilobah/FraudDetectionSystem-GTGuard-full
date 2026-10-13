@@ -60,6 +60,13 @@ ANALYTICS_CACHE_TTL = float(os.getenv("ANALYTICS_CACHE_TTL_SECONDS", "5"))
 
 _analytics_cache = {"ts": 0.0, "data": None}
 
+# Heatmap aggregation cache: the Threat Heatmap polls /analytics/heatmap
+# every 15s; a full nearest-city scan across the whole table on every poll is
+# wasteful. 15s staleness is invisible on a live map.
+HEATMAP_CACHE_TTL = float(os.getenv("HEATMAP_CACHE_TTL_SECONDS", "15"))
+
+_heatmap_cache = {"ts": 0.0, "data": None}
+
 
 class _PGCursor:
     """Wraps a psycopg2 RealDictCursor so rows behave like sqlite3.Row
@@ -1508,6 +1515,49 @@ class TransactionRepository:
             _analytics_cache["ts"] = now
             _analytics_cache["data"] = result
             return result
+
+    def get_fraud_heatmap(self) -> list:
+        """Fraud-transaction counts bucketed to the nearest Nigerian state
+        capital, for the Threat Heatmap. `fraud` uses model_prediction at
+        write time (COALESCE back to is_fraud for pre-v4 rows) - the same
+        definition as get_analytics_summary. The inlined places VALUES +
+        haversine mirror _build_filters' location filter, so the map and the
+        ledger agree on which city owns which row. Rows without coordinates
+        are skipped."""
+        now = time.time()
+        if _heatmap_cache["data"] is not None and (now - _heatmap_cache["ts"]) < HEATMAP_CACHE_TTL:
+            return _heatmap_cache["data"]
+
+        places_values = ", ".join(
+            "('%s', '%s', %r::float, %r::float)"
+            % (name.replace("'", "''"), state.replace("'", "''"), lat, lon)
+            for name, state, lat, lon in NIGERIAN_PLACES
+        )
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                WITH places(name, state, lat, lon) AS (VALUES """ + places_values + """)
+                SELECT nearest.name AS name,
+                       nearest.state AS state,
+                       COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE COALESCE(t.model_prediction, t.is_fraud) = 1) AS fraud
+                FROM transactions t
+                JOIN LATERAL (
+                    SELECT p.name, p.state, p.lat, p.lon FROM places p
+                    ORDER BY 6371.0 * 2 * asin(least(1.0, sqrt(
+                        power(sin(radians(p.lat - t.location_latitude) / 2.0), 2) +
+                        cos(radians(t.location_latitude)) * cos(radians(p.lat)) *
+                        power(sin(radians(p.lon - t.location_longitude) / 2.0), 2)
+                    ))) ASC
+                    LIMIT 1
+                ) nearest ON t.location_latitude IS NOT NULL AND t.location_longitude IS NOT NULL
+                GROUP BY nearest.name, nearest.state
+                ORDER BY fraud DESC, nearest.name ASC
+            """)
+            items = [dict(row) for row in cursor.fetchall()]
+
+        _heatmap_cache["ts"] = time.time()
+        _heatmap_cache["data"] = items
+        return items
 
 
 db_repo = TransactionRepository()
