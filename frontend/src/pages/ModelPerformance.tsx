@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from "react";
 import type { ModelMetadata, ModelComparison, FeatureImportance } from "../types";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
-import { Award, Zap, Database, Users, RefreshCw } from "lucide-react";
+import { Award, Zap, Database, Users, RefreshCw, BarChart3 } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
 import { getFeedbackConfusionMatrix, type FeedbackConfusionMatrix } from "../services/api";
+import { ConfusionMatrix } from "../components/ConfusionMatrix";
 
 interface ModelPerformanceProps {
   modelMeta: ModelMetadata | null;
@@ -83,7 +84,7 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
               </div>
               <div className="text-xs text-dark-muted font-semibold bg-gray-50 dark:bg-white/5 border border-dark-border p-2.5 rounded-lg space-y-1">
                 <div className="flex justify-between"><span>Trained Timestamp:</span><span className="text-dark-text font-mono">{modelMeta.training_timestamp}</span></div>
-                <div className="flex justify-between"><span>Training Dataset Size:</span><span className="text-dark-text">1,000 Records</span></div>
+                <div className="flex justify-between"><span>Training Dataset Size:</span><span className="text-dark-text">10,000 Records</span></div>
               </div>
             </div>
             
@@ -100,10 +101,40 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
           </div>
         )}
 
-        {/* Live analyst-feedback confusion matrix (replaces the old static
-            validation-split matrix): human decisions as ground truth vs the
-            model's snapshot prediction — reviewers drive these numbers. */}
-        <div className={`bg-dark-card border border-dark-border p-5 rounded-xl shadow-glow-brand ${modelMeta ? "md:col-span-2" : "md:col-span-3"}`}>
+        {/* Model Validation Confusion Matrix — out-of-sample holdout for the
+            active model. Always visible: metadata ships with /analytics, so
+            this renders for every user regardless of role. */}
+        {modelMeta && (
+          <div className="bg-dark-card border border-dark-border p-5 rounded-xl shadow-glow-brand md:col-span-2">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="p-2 rounded bg-guard-orangeLight text-guard-orange">
+                <BarChart3 className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-dark-text">Confusion Matrix (Validation Split)</h3>
+                <p className="text-xs text-dark-muted">
+                  Out-of-sample holdout for {modelMeta.selected_model} — model predictions vs the true labels
+                </p>
+              </div>
+            </div>
+            <ConfusionMatrix
+              tn={modelMeta.confusion_matrix[0][0]}
+              fp={modelMeta.confusion_matrix[0][1]}
+              fn={modelMeta.confusion_matrix[1][0]}
+              tp={modelMeta.confusion_matrix[1][1]}
+              accuracy={modelMeta.metrics.accuracy}
+              precision={modelMeta.metrics.precision}
+              recall={modelMeta.metrics.recall}
+              f1={modelMeta.metrics.f1}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Live analyst-feedback confusion matrix: human decisions as ground
+          truth vs the model's snapshot prediction — reviewers drive these
+          numbers. Admin-backed; everyone still sees the validation matrix. */}
+      <div className="bg-dark-card border border-dark-border p-5 rounded-xl shadow-glow-brand">
         <div className="flex items-center gap-2 mb-4">
           <div className="p-2 rounded bg-guard-orangeLight text-guard-orange">
             <Users className="h-5 w-5" />
@@ -131,8 +162,9 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
           </div>
         )}
         {fbState === "forbidden" && (
-          <div className="h-40 flex items-center justify-center text-dark-muted text-xs">
-            Admin access required to view the feedback matrix.
+          <div className="h-24 flex items-center justify-center text-dark-muted text-xs text-center px-6">
+            The live analyst-feedback matrix is admin-only. The validation-split
+            matrix above is shown for everyone.
           </div>
         )}
         {fbState === "error" && (
@@ -148,39 +180,22 @@ export const ModelPerformance: React.FC<ModelPerformanceProps> = ({
         )}
         {fbState === "ok" && fb && fb.total > 0 && (
           <>
-            <div className="grid grid-cols-2 gap-4 max-w-md mx-auto pt-3">
-              {/* TN */}
-              <div className="bg-gray-50 dark:bg-white/5 border border-dark-border p-4 rounded-xl text-center space-y-1.5">
-                <span className="text-[10px] text-brand-success font-extrabold tracking-wider block uppercase">True Negative (TN)</span>
-                <span className="text-2xl font-bold text-dark-text">{fb.tn}</span>
-                <span className="text-[10px] text-dark-muted block">Genuine approved — model agreed</span>
-              </div>
-              {/* FP */}
-              <div className="bg-gray-50 dark:bg-white/5 border border-brand-warning/20 p-4 rounded-xl text-center space-y-1.5">
-                <span className="text-[10px] text-brand-warning font-extrabold tracking-wider block uppercase">False Positive (FP)</span>
-                <span className="text-2xl font-bold text-dark-text">{fb.fp}</span>
-                <span className="text-[10px] text-dark-muted block">Model flagged, human approved</span>
-              </div>
-              {/* FN */}
-              <div className="bg-gray-50 dark:bg-white/5 border border-brand-danger/20 p-4 rounded-xl text-center space-y-1.5">
-                <span className="text-[10px] text-brand-danger/60 font-extrabold tracking-wider block uppercase">False Negative (FN)</span>
-                <span className="text-2xl font-bold text-dark-text">{fb.fn}</span>
-                <span className="text-[10px] text-dark-muted block">Model cleared, human blocked</span>
-              </div>
-              {/* TP */}
-              <div className="bg-gray-50 dark:bg-white/5 border border-brand-success/40 p-4 rounded-xl text-center space-y-1.5">
-                <span className="text-[10px] text-brand-success font-extrabold tracking-wider block uppercase">True Positive (TP)</span>
-                <span className="text-2xl font-bold text-dark-text">{fb.tp}</span>
-                <span className="text-[10px] text-dark-muted block">Fraud blocked — model agreed</span>
-              </div>
-            </div>
+            <ConfusionMatrix
+              tn={fb.tn}
+              fp={fb.fp}
+              fn={fb.fn}
+              tp={fb.tp}
+              accuracy={fb.accuracy}
+              precision={fb.precision}
+              recall={fb.recall}
+              f1={fb.f1}
+            />
 
             <p className="text-[10px] text-dark-muted text-center mt-4">
               Based on {fb.total} human decision{fb.total === 1 ? "" : "s"} · {fb.analyst_flagged} analyst-flagged
             </p>
           </>
         )}
-        </div>
       </div>
 
       {/* Model Benchmark Table */}
