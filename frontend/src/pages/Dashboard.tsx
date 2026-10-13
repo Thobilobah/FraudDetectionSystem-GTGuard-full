@@ -200,13 +200,50 @@ export const Dashboard: React.FC<DashboardProps> = ({
         ))}
       </div>
 
-      {/* Account Review SLA - admin decision latency on account-suspension
-          requests, shown just above the analyst's own requests */}
-      <SlaPieChart
-        sla={sla}
-        title="Account Review SLA"
-        subtitle={isAdmin ? "All account-suspension requests" : "Your account-suspension requests"}
-      />
+      {/* Real-Time Traffic Analytics */}
+      <div className="bg-dark-card border border-dark-border rounded-xl p-5 shadow-glow-brand">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-lg font-semibold text-dark-text">Real-Time Traffic Analytics</h3>
+            <p className="text-xs text-dark-muted">Transactions vs Fraud incidents by hour of day</p>
+          </div>
+          <div className="flex items-center gap-2 text-xs font-semibold text-brand-success bg-brand-success/10 px-2.5 py-1 rounded-full">
+            <TrendingUp className="h-4 w-4" /> Live Feeds Active
+          </div>
+        </div>
+        <div className="h-72 w-full">
+          {chartData.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="colorTx" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#4F46E5" stopOpacity={0.4}/>
+                    <stop offset="95%" stopColor="#4F46E5" stopOpacity={0}/>
+                  </linearGradient>
+                  <linearGradient id="colorFraud" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#EF4444" stopOpacity={0.4}/>
+                    <stop offset="95%" stopColor="#EF4444" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+                <XAxis dataKey="hour" stroke={axisStroke} fontSize={11} />
+                <YAxis stroke={axisStroke} fontSize={11} />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: "#151D30", borderColor: "#222E4A", color: "#F3F4F6" }} 
+                  itemStyle={{ color: "#F3F4F6" }}
+                />
+                <Legend />
+                <Area type="monotone" dataKey="Transactions" stroke="#4F46E5" fillOpacity={1} fill="url(#colorTx)" strokeWidth={2} />
+                <Area type="monotone" dataKey="Fraud" stroke="#EF4444" fillOpacity={1} fill="url(#colorFraud)" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-full flex items-center justify-center text-dark-muted">
+              No transaction data available yet. Generate transactions in simulator.
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Analyst's own raised work - analysts only, uniquely scoped to their own
           account-suspension requests (admins use the Review Queue) */}
@@ -356,49 +393,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       {/* Grid of Chart & Alerts */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Hourly Volume Chart */}
-        <div className="bg-dark-card border border-dark-border rounded-xl p-5 shadow-glow-brand lg:col-span-2">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="text-lg font-semibold text-dark-text">Real-Time Traffic Analytics</h3>
-              <p className="text-xs text-dark-muted">Transactions vs Fraud incidents by hour of day</p>
-            </div>
-            <div className="flex items-center gap-2 text-xs font-semibold text-brand-success bg-brand-success/10 px-2.5 py-1 rounded-full">
-              <TrendingUp className="h-4 w-4" /> Live Feeds Active
-            </div>
-          </div>
-          <div className="h-72 w-full">
-            {chartData.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="colorTx" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#4F46E5" stopOpacity={0.4}/>
-                      <stop offset="95%" stopColor="#4F46E5" stopOpacity={0}/>
-                    </linearGradient>
-                    <linearGradient id="colorFraud" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#EF4444" stopOpacity={0.4}/>
-                      <stop offset="95%" stopColor="#EF4444" stopOpacity={0}/>
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
-                  <XAxis dataKey="hour" stroke={axisStroke} fontSize={11} />
-                  <YAxis stroke={axisStroke} fontSize={11} />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: "#151D30", borderColor: "#222E4A", color: "#F3F4F6" }} 
-                    itemStyle={{ color: "#F3F4F6" }}
-                  />
-                  <Legend />
-                  <Area type="monotone" dataKey="Transactions" stroke="#4F46E5" fillOpacity={1} fill="url(#colorTx)" strokeWidth={2} />
-                  <Area type="monotone" dataKey="Fraud" stroke="#EF4444" fillOpacity={1} fill="url(#colorFraud)" strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="h-full flex items-center justify-center text-dark-muted">
-                No transaction data available yet. Generate transactions in simulator.
-              </div>
-            )}
-          </div>
+        {/* Account Review SLA - admin decision latency on account-suspension
+            requests */}
+        <div className="lg:col-span-2">
+          <SlaPieChart
+            sla={sla}
+            title="Account Review SLA"
+            subtitle={isAdmin ? "All account-suspension requests" : "Your account-suspension requests"}
+          />
         </div>
 
         {/* Live Alerts list */}
