@@ -49,3 +49,15 @@ class BulkResolveRequest(BaseModel):
         description="1-100 PENDING/SUSPENDED transaction IDs to resolve"
     )
     decision: str = Field(..., description="APPROVED or BLOCKED")
+
+
+class SuspendAccountRequest(BaseModel):
+    """Analyst request to suspend a sender account after a HIGH-risk
+    transaction was auto-BLOCKED. `note` is the analyst's recommendation."""
+    source_txn_id: str = Field(..., description="The auto-BLOCKED high-risk transaction that prompted this")
+    note: str = Field("", max_length=1000, description="Analyst recommendation for the admin")
+
+
+class ReviewSuspendRequest(BaseModel):
+    """Admin decision on an account-suspension request."""
+    decision: str = Field(..., description="APPROVED or DECLINED")

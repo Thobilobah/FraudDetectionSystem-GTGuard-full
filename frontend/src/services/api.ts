@@ -1,5 +1,8 @@
 import axios from "axios";
-import type { Transaction, TransactionPage, AnalyticsResponse } from "../types";
+import type {
+  Transaction, TransactionPage, AnalyticsResponse,
+  AccountSuspendRequest, SuspendRequestPage, SuspendRequestSla, BlockedAccount,
+} from "../types";
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const TOKEN_KEY = "fraudguard_token";
@@ -285,6 +288,70 @@ export const getFeedbackConfusionMatrix = async (
   const response = await api.get("/transactions/confusion-matrix", {
     params: days ? { days } : {},
   });
+  return response.data;
+};
+
+/**
+ * Analyst action: file an account-suspension request against the sender of an
+ * auto-BLOCKED high-risk transaction, with a recommendation note for the
+ * admin. The transaction itself is never modified.
+ */
+export const createSuspendRequest = async (
+  accountId: string,
+  sourceTxnId: string,
+  note: string
+): Promise<AccountSuspendRequest> => {
+  const response = await api.post(
+    `/accounts/${encodeURIComponent(accountId)}/suspend-request`,
+    { source_txn_id: sourceTxnId, note }
+  );
+  return response.data;
+};
+
+export interface SuspendRequestParams {
+  status?: "PENDING" | "APPROVED" | "DECLINED";
+  /** Only this user's own requests (forced true for analysts server-side). */
+  mine?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+/** Account-suspension requests (analysts see their own; admins see all). */
+export const getSuspendRequests = async (
+  params: SuspendRequestParams = {}
+): Promise<SuspendRequestPage> => {
+  const response = await api.get("/accounts/suspend-requests", { params });
+  return response.data;
+};
+
+/** SLA distribution of account-suspension requests (admin decision latency). */
+export const getSuspendRequestSla = async (mine = false): Promise<SuspendRequestSla> => {
+  const response = await api.get("/accounts/suspend-requests/sla", { params: { mine } });
+  return response.data;
+};
+
+/** Admin decision on an account-suspension request. APPROVED adds the account
+ * to the blocklist; DECLINED just closes the request. */
+export const reviewSuspendRequest = async (
+  requestId: string,
+  decision: "APPROVED" | "DECLINED"
+): Promise<AccountSuspendRequest> => {
+  const response = await api.post(
+    `/accounts/suspend-requests/${encodeURIComponent(requestId)}/review`,
+    { decision }
+  );
+  return response.data;
+};
+
+/** Admin: current account blocklist (approved suspensions). */
+export const getBlockedAccounts = async (): Promise<BlockedAccount[]> => {
+  const response = await api.get("/accounts/blocked");
+  return response.data.items ?? [];
+};
+
+/** Admin: lift an approved account suspension (preserves the audit trail). */
+export const unblockAccount = async (accountId: string): Promise<BlockedAccount> => {
+  const response = await api.delete(`/accounts/${encodeURIComponent(accountId)}/block`);
   return response.data;
 };
 

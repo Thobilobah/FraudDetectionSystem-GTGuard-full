@@ -11,6 +11,7 @@ import { getStoredUser, getTransactionsPage, resolveTransaction, getTransactionB
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
 import { formatPlace, isInNigeria } from "../utils/nigeriaPlaces";
+import { AccountRequestsPanel } from "../components/AccountRequestsPanel";
 
 const POLL_MS = 10000;
 
@@ -31,7 +32,7 @@ export const ReviewQueue: React.FC = () => {
   const currentUser = getStoredUser();
   const isAdmin = currentUser?.role === "admin";
 
-  const [tab, setTab] = useState<"pending" | "completed">("pending");
+  const [tab, setTab] = useState<"pending" | "completed" | "requests">("pending");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
   // Newest-first stays the default (as requested earlier); the dropdown adds
@@ -65,6 +66,9 @@ export const ReviewQueue: React.FC = () => {
 
   const refresh = useCallback(async () => {
     if (!isAdmin) return;
+    // The Account Requests tab owns its own data/loading (analyst-raised
+    // account-suspension requests + SLA), so skip the transaction fetch.
+    if (tab === "requests") return;
     setFetching(true);
     setLoadError(null);
     try {
@@ -374,6 +378,16 @@ export const ReviewQueue: React.FC = () => {
           >
             <ShieldCheck className="h-3.5 w-3.5" /> Completed ({completedTotal})
           </button>
+          <button
+            onClick={() => { setTab("requests"); setPage(0); }}
+            className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 ${
+              tab === "requests"
+                ? "bg-brand-danger text-white"
+                : "bg-dark-card border border-dark-border text-dark-muted hover:text-dark-text"
+            }`}
+          >
+            <Ban className="h-3.5 w-3.5" /> Account Requests
+          </button>
         </div>
         <div className="flex items-center gap-2 text-xs text-dark-muted font-semibold">
           <span className="relative flex h-2 w-2">
@@ -384,6 +398,10 @@ export const ReviewQueue: React.FC = () => {
         </div>
       </div>
 
+      {tab === "requests" ? (
+        <AccountRequestsPanel />
+      ) : (
+        <>
       {/* Search: by Transaction ID or User Account, applied via the button */}
       <form onSubmit={handleSearchSubmit} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
         <div className="relative flex-1 max-w-md">
@@ -719,6 +737,8 @@ export const ReviewQueue: React.FC = () => {
           </div>
         </div>
       </div>
+        </>
+      )}
 
       {/* Transaction detail modal - same analysis as the Live Monitor pane */}
       {selectedTxn && (

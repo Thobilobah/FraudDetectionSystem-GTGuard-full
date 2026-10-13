@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useRef } from "react";
-import type { Transaction } from "../types";
-import { resolveTransaction, suspendTransaction, bulkSuspendTransactions, authenticateTransaction, getStoredUser, getTransactionsPage } from "../services/api";
-import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search, Fingerprint, Clock } from "lucide-react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import type { Transaction, AccountSuspendRequest, SuspendRequestSla } from "../types";
+import { resolveTransaction, suspendTransaction, bulkSuspendTransactions, authenticateTransaction, getStoredUser, getTransactionsPage, createSuspendRequest, getSuspendRequests, getSuspendRequestSla } from "../services/api";
+import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search, Fingerprint, Clock, Send, X } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
 import { formatPlace, isInNigeria } from "../utils/nigeriaPlaces";
+import { SlaPieChart } from "../components/SlaPieChart";
 
 interface LiveMonitorProps {
   onRefresh: () => void;
@@ -41,6 +42,35 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkConfirm, setBulkConfirm] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+
+  // Account-suspension workflow: analysts raise a request against the sender
+  // account of a HIGH-risk (auto-BLOCKED) transaction, with a recommendation
+  // note for the admin. The transaction itself is never modified.
+  const [sla, setSla] = useState<SuspendRequestSla | null>(null);
+  const [requests, setRequests] = useState<AccountSuspendRequest[]>([]);
+  const [reqTxn, setReqTxn] = useState<Transaction | null>(null);
+  const [reqNote, setReqNote] = useState("");
+  const [submittingReq, setSubmittingReq] = useState(false);
+
+  const loadAccountWorkflow = useCallback(async () => {
+    try {
+      const [slaData, reqPage] = await Promise.all([
+        getSuspendRequestSla(!isAdmin),
+        getSuspendRequests({ limit: 200, ...(isAdmin ? {} : { mine: true }) }),
+      ]);
+      setSla(slaData);
+      setRequests(reqPage.items);
+    } catch (e) {
+      // Non-fatal: the surveillance stream still works without this card.
+      console.error("Failed to load account-suspension data:", e);
+    }
+  }, [isAdmin]);
+
+  useEffect(() => {
+    loadAccountWorkflow();
+    const id = setInterval(loadAccountWorkflow, 10000);
+    return () => clearInterval(id);
+  }, [loadAccountWorkflow]);
 
   // Re-fetch the active page without flipping the loading flag, so periodic
   // refreshes don't dim the table. Errors keep the previous rows on screen.
@@ -228,6 +258,36 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
     }
   };
 
+  const openSuspendRequest = (txn: Transaction) => {
+    setReqTxn(txn);
+    setReqNote("");
+  };
+
+  const submitSuspendRequest = async () => {
+    if (!reqTxn || submittingReq) return;
+    setSubmittingReq(true);
+    try {
+      await createSuspendRequest(reqTxn.user_id, reqTxn.transaction_id, reqNote.trim());
+      showToast("success", "Suspension request sent", `Account ${reqTxn.user_id} is now awaiting admin review.`);
+      setReqTxn(null);
+      setReqNote("");
+      await loadAccountWorkflow();
+      await reloadCurrentPage();
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      showToast("danger", "Request failed", typeof detail === "string" ? detail : "Could not raise the suspension request.");
+    } finally {
+      setSubmittingReq(false);
+    }
+  };
+
+  // The most relevant suspension request for a sender account (a still-PENDING
+  // one wins over a past decision) so HIGH rows can render the correct state.
+  const requestFor = (accountId: string): AccountSuspendRequest | undefined => {
+    const matching = requests.filter((r) => r.account_id === accountId);
+    return matching.find((r) => r.status === "PENDING") ?? matching[0];
+  };
+
   const getRiskBadge = (level: string | null) => {
     switch (level) {
       case "LOW":
@@ -369,6 +429,33 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
     }
 
     if (txn.status === "BLOCKED") {
+      const req = requestFor(txn.user_id);
+      const canRequest = !isAdmin && txn.risk_level === "HIGH";
+      if (canRequest && (!req || req.status === "DECLINED")) {
+        return (
+          <button
+            onClick={(e) => { e.stopPropagation(); openSuspendRequest(txn); }}
+            className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-md bg-brand-danger/10 text-brand-danger border border-brand-danger/30 hover:bg-brand-danger/20 transition whitespace-nowrap"
+            title="Raise an account-suspension request for the admin"
+          >
+            <ShieldAlert className="h-3 w-3" /> Request Suspension
+          </button>
+        );
+      }
+      if (req?.status === "PENDING") {
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-md bg-brand-warning/10 text-brand-warning border border-brand-warning/30 whitespace-nowrap" title="Awaiting admin decision">
+            <Clock className="h-3 w-3" /> Suspension Pending
+          </span>
+        );
+      }
+      if (req?.status === "APPROVED") {
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-md bg-brand-danger/10 text-brand-danger border border-brand-danger/30 whitespace-nowrap" title="Account suspended by admin">
+            <ShieldAlert className="h-3 w-3" /> Account Suspended
+          </span>
+        );
+      }
       return <span className="text-xs font-bold text-brand-danger">Blocked</span>;
     }
     return <span className="text-xs font-bold text-brand-success">Approved</span>;
@@ -397,6 +484,12 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
           Refresh Feeds
         </button>
       </div>
+
+      <SlaPieChart
+        sla={sla}
+        title="Account Review SLA"
+        subtitle={isAdmin ? "All account-suspension requests" : "Your account-suspension requests"}
+      />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Logs Table */}
@@ -778,6 +871,29 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                 </div>
               )}
 
+              {/* Account-suspension request for this sender, if any */}
+              {(() => {
+                const req = requestFor(selectedTxn.user_id);
+                if (!req) return null;
+                const tone =
+                  req.status === "APPROVED" ? "border-brand-danger/30 bg-brand-danger/5 text-brand-danger"
+                  : req.status === "DECLINED" ? "border-dark-border bg-gray-50 dark:bg-white/5 text-dark-muted"
+                  : "border-brand-warning/30 bg-brand-warning/5 text-brand-warning";
+                return (
+                  <div className={`text-[11px] border rounded-lg px-3 py-2 space-y-1 ${tone}`}>
+                    <div className="flex items-center gap-2 font-bold">
+                      <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+                      Account suspension · {req.status}
+                    </div>
+                    {req.note && <p className="text-dark-text leading-snug whitespace-pre-wrap">{req.note}</p>}
+                    <p className="text-dark-muted">
+                      Requested by <span className="font-semibold text-dark-text">{req.requested_by}</span>
+                      {req.reviewed_by && <> · decided by <span className="font-semibold text-dark-text">{req.reviewed_by}</span></>}
+                    </p>
+                  </div>
+                );
+              })()}
+
               {/* Stats Grid */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-gray-50/50 dark:bg-white/5 border border-dark-border p-3 rounded-lg">
@@ -881,6 +997,67 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
           )}
         </div>
       </div>
+
+      {/* Account-suspension request modal (analyst) */}
+      {reqTxn && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => !submittingReq && setReqTxn(null)}
+          />
+          <div className="relative bg-dark-card border border-dark-border rounded-xl shadow-glow-brand w-full max-w-lg p-6 space-y-4">
+            <button
+              onClick={() => !submittingReq && setReqTxn(null)}
+              aria-label="Close"
+              className="absolute top-4 right-4 text-dark-muted hover:text-dark-text transition p-1 rounded-lg hover:bg-dark-border/30"
+            >
+              <X className="h-5 w-5" />
+            </button>
+
+            <div className="pr-8">
+              <span className="text-[10px] text-brand-danger font-bold uppercase tracking-wider block">Request Account Suspension</span>
+              <h3 className="text-base font-bold text-dark-text flex items-center gap-2 mt-1">
+                <ShieldAlert className="h-4 w-4 text-brand-danger" /> {reqTxn.user_id}
+              </h3>
+              <p className="text-xs text-dark-muted mt-1.5 leading-relaxed">
+                The high-risk transaction <span className="font-mono text-dark-text">{reqTxn.transaction_id}</span> is already
+                auto-BLOCKED. This raises a request for an admin to suspend the account; the transaction itself is unchanged.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-dark-muted block mb-1">Recommendation note (for the admin)</label>
+              <textarea
+                value={reqNote}
+                onChange={(e) => setReqNote(e.target.value)}
+                rows={4}
+                maxLength={1000}
+                placeholder="Why should this account be suspended? e.g. repeated high-value transfers to a brand-new beneficiary, mule-like velocity…"
+                className="w-full bg-dark-bg border border-dark-border text-dark-text text-sm rounded-lg px-3 py-2 focus:border-guard-orange focus:outline-none placeholder:text-dark-muted/60 resize-none"
+              />
+              <span className="text-[10px] text-dark-muted">{reqNote.length}/1000</span>
+            </div>
+
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setReqTxn(null)}
+                disabled={submittingReq}
+                className="text-xs font-bold px-4 py-2 rounded-lg bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text transition disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitSuspendRequest}
+                disabled={submittingReq}
+                className="inline-flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-lg bg-brand-danger text-white hover:bg-brand-danger/90 transition disabled:opacity-50"
+              >
+                {submittingReq ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                Submit Request
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

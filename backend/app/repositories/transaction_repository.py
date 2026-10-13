@@ -16,6 +16,7 @@ import os
 import re
 import json
 import time
+import uuid
 from datetime import datetime, timedelta
 import pandas as pd
 from backend.app.services.nigeria_places import NIGERIAN_PLACES
@@ -35,7 +36,11 @@ _PLACEHOLDER_RE = re.compile(r"\?")
 # start (those checks were a serverless startup-cost multiplier).
 # v4: model_prediction - immutable snapshot of the model's verdict at write
 # time (resolve used to overwrite the only copy of it inside is_fraud).
-SCHEMA_VERSION = "5"
+# v6: analyst account-suspension requests + the approved account blocklist
+# (account_suspend_requests / blocked_accounts). The HIGH-risk transaction is
+# never modified: it stays auto-BLOCKED while an analyst files a request for
+# the admin to approve or decline.
+SCHEMA_VERSION = "6"
 
 # Cap how many historical rows feature engineering will load per queried
 # user/beneficiary. Bounded windows keep prediction latency flat as the
@@ -257,6 +262,40 @@ class TransactionRepository:
                 )
             """)
 
+            # 7. Account Suspension Requests. A HIGH-risk transaction is auto-
+            # BLOCKED by the model and is never modified. Instead, an analyst
+            # files a request (with a recommendation note) against the sender
+            # account, which an admin approves (=> account added to the
+            # blocklist) or declines.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS account_suspend_requests (
+                    request_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    source_txn_id TEXT,
+                    requested_by TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    note TEXT,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    reviewed_by TEXT,
+                    reviewed_at TEXT
+                )
+            """)
+
+            # 8. Approved Account Blocklist. Rows are only written when an admin
+            # APPROVES a suspension request (active=1). Kept separate from the
+            # request log so the same account can be re-requested after a
+            # decline and the audit trail of requests is preserved.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS blocked_accounts (
+                    account_id TEXT PRIMARY KEY,
+                    reason TEXT,
+                    source_txn_id TEXT,
+                    blocked_by TEXT,
+                    blocked_at TEXT,
+                    active INTEGER DEFAULT 1
+                )
+            """)
+
             # Indexes for the hot query paths. CREATE INDEX IF NOT EXISTS is
             # idempotent (a no-op once present), so on the live Neon database
             # this block builds the indexes in-place on first deploy without
@@ -267,6 +306,9 @@ class TransactionRepository:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_txn_bene_time ON transactions (beneficiary_id, timestamp DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_txn_created ON transactions (created_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_txn_status ON transactions (status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_asr_status_time ON account_suspend_requests (status, requested_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_asr_account ON account_suspend_requests (account_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_asr_requester ON account_suspend_requests (requested_by, requested_at DESC)")
 
             conn.commit()
 
@@ -939,6 +981,193 @@ class TransactionRepository:
             "auto_resolved": int(row["auto_resolved"] or 0),
             "analyst_flagged": int(row["analyst_flagged"] or 0),
             "still_pending": int(row["still_pending"] or 0),
+        }
+
+    def create_suspend_request(self, account_id: str, source_txn_id: str,
+                               requested_by: str, note: str) -> dict:
+        """An analyst asks the admin to suspend an ACCOUNT after one of its
+        transactions was auto-BLOCKED as HIGH risk. Nothing on the transaction
+        changes - the model's auto-block stands; this only opens a review item.
+        Guards: the source transaction must exist and be BLOCKED, and only one
+        open PENDING request per account is allowed (re-request after a decline
+        is fine). Returns {'error': ...} on failure or the new row on success."""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT transaction_id, status, risk_level FROM transactions WHERE transaction_id = ?",
+                (source_txn_id,),
+            )
+            txn = cursor.fetchone()
+            if not txn:
+                return {"error": "txn_not_found"}
+            if txn["status"] != "BLOCKED" or txn["risk_level"] != "HIGH":
+                return {"error": "not_high_risk"}
+
+            cursor = conn.execute(
+                "SELECT request_id FROM account_suspend_requests WHERE account_id = ? AND status = 'PENDING'",
+                (account_id,),
+            )
+            if cursor.fetchone():
+                return {"error": "already_requested"}
+
+            request_id = f"asr_{uuid.uuid4().hex[:12]}"
+            requested_at = datetime.now().isoformat()
+            conn.execute("""
+                INSERT INTO account_suspend_requests
+                (request_id, account_id, source_txn_id, requested_by, requested_at, note, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
+            """, (request_id, account_id, source_txn_id, requested_by, requested_at, note))
+            conn.commit()
+
+            cursor = conn.execute(
+                "SELECT * FROM account_suspend_requests WHERE request_id = ?", (request_id,)
+            )
+            return dict(cursor.fetchone())
+
+    @staticmethod
+    def _request_filters(status: str, requested_by: str) -> tuple:
+        clauses, params = [], []
+        if status:
+            clauses.append("r.status = ?")
+            params.append(status)
+        if requested_by:
+            clauses.append("r.requested_by = ?")
+            params.append(requested_by)
+        where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where_sql, params
+
+    def list_suspend_requests(self, status: str = "", requested_by: str = "",
+                              limit: int = 50, offset: int = 0) -> list:
+        """Analyst/admin list of account-suspension requests, newest first,
+        each joined to its source transaction for context (amount, score)."""
+        where_sql, params = self._request_filters(status, requested_by)
+        with self.get_connection() as conn:
+            cursor = conn.execute(f"""
+                SELECT r.*,
+                       t.amount AS source_amount,
+                       t.risk_score AS source_risk_score,
+                       t.risk_level AS source_risk_level,
+                       t.created_at AS source_created_at
+                FROM account_suspend_requests r
+                LEFT JOIN transactions t ON t.transaction_id = r.source_txn_id
+                {where_sql}
+                ORDER BY r.requested_at DESC
+                LIMIT {limit} OFFSET {offset}
+            """, tuple(params))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def count_suspend_requests(self, status: str = "", requested_by: str = "") -> int:
+        where_sql, params = self._request_filters(status, requested_by)
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                f"SELECT COUNT(*) AS total FROM account_suspend_requests r {where_sql}",
+                tuple(params),
+            )
+            return cursor.fetchone()["total"]
+
+    def review_suspend_request(self, request_id: str, decision: str,
+                               reviewed_by: str) -> dict:
+        """Admin approves or declines a PENDING request. APPROVED also upserts
+        the account into the blocklist (active=1); DECLINED only stamps the
+        request. The status='PENDING' guard makes the decision race-safe."""
+        reviewed_at = datetime.now().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE account_suspend_requests
+                SET status = ?, reviewed_by = ?, reviewed_at = ?
+                WHERE request_id = ? AND status = 'PENDING'
+                RETURNING *
+            """, (decision, reviewed_by, reviewed_at, request_id))
+            updated = cursor.fetchone()
+
+            if not updated:
+                cursor = conn.execute(
+                    "SELECT request_id FROM account_suspend_requests WHERE request_id = ?",
+                    (request_id,),
+                )
+                if not cursor.fetchone():
+                    return {"error": "not_found"}
+                return {"error": "already_reviewed"}
+
+            if decision == "APPROVED":
+                conn.execute("""
+                    INSERT INTO blocked_accounts
+                    (account_id, reason, source_txn_id, blocked_by, blocked_at, active)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                    ON CONFLICT (account_id) DO UPDATE SET
+                        reason = EXCLUDED.reason,
+                        source_txn_id = EXCLUDED.source_txn_id,
+                        blocked_by = EXCLUDED.blocked_by,
+                        blocked_at = EXCLUDED.blocked_at,
+                        active = 1
+                """, (
+                    updated["account_id"],
+                    updated["note"] or "Account suspension approved after high-risk fraud review",
+                    updated["source_txn_id"],
+                    reviewed_by,
+                    reviewed_at,
+                ))
+            conn.commit()
+            return dict(updated)
+
+    def get_blocked_accounts(self, active: int = 1) -> list:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM blocked_accounts WHERE active = ? ORDER BY blocked_at DESC",
+                (active,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def unblock_account(self, account_id: str) -> dict:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE blocked_accounts SET active = 0 WHERE account_id = ? RETURNING *",
+                (account_id,),
+            )
+            updated = cursor.fetchone()
+            conn.commit()
+            if not updated:
+                return {"error": "not_found"}
+            return dict(updated)
+
+    def suspend_request_sla(self, requested_by: str = "") -> dict:
+        """SLA distribution for account-suspension requests, measured as the
+        admin-decision latency (reviewed_at - requested_at, in minutes).
+        Reviewed requests fall into <30m (within), 30-120m (at risk) or >2h
+        (breached); still-PENDING ones are 'awaiting'. `requested_by` scopes to
+        one analyst (mine); empty means all requests (admin view)."""
+        where_sql = " WHERE r.requested_by = ?" if requested_by else ""
+        params = (requested_by,) if requested_by else ()
+        with self.get_connection() as conn:
+            cursor = conn.execute(f"""
+                SELECT
+                    COUNT(*) FILTER (WHERE r.status = 'PENDING') AS awaiting,
+                    COUNT(*) FILTER (WHERE r.status = 'APPROVED') AS approved,
+                    COUNT(*) FILTER (WHERE r.status = 'DECLINED') AS declined,
+                    COUNT(*) FILTER (WHERE r.status <> 'PENDING' AND
+                        EXTRACT(EPOCH FROM (r.reviewed_at::timestamp - r.requested_at::timestamp)) / 60.0 < 30) AS within_sla,
+                    COUNT(*) FILTER (WHERE r.status <> 'PENDING' AND
+                        EXTRACT(EPOCH FROM (r.reviewed_at::timestamp - r.requested_at::timestamp)) / 60.0 >= 30 AND
+                        EXTRACT(EPOCH FROM (r.reviewed_at::timestamp - r.requested_at::timestamp)) / 60.0 < 120) AS at_risk,
+                    COUNT(*) FILTER (WHERE r.status <> 'PENDING' AND
+                        EXTRACT(EPOCH FROM (r.reviewed_at::timestamp - r.requested_at::timestamp)) / 60.0 >= 120) AS breached
+                FROM account_suspend_requests r
+                {where_sql}
+            """, params)
+            row = cursor.fetchone()
+        awaiting = int(row["awaiting"] or 0)
+        approved = int(row["approved"] or 0)
+        declined = int(row["declined"] or 0)
+        within_sla = int(row["within_sla"] or 0)
+        at_risk = int(row["at_risk"] or 0)
+        breached = int(row["breached"] or 0)
+        return {
+            "awaiting": awaiting,
+            "approved": approved,
+            "declined": declined,
+            "within_sla": within_sla,
+            "at_risk": at_risk,
+            "breached": breached,
+            "total": awaiting + approved + declined,
         }
 
     def run_auth_timeout_sweep(self) -> dict:

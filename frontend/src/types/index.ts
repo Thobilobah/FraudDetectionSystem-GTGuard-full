@@ -37,6 +37,51 @@ export interface TransactionPage {
   offset: number;
 }
 
+export type SuspendRequestStatus = "PENDING" | "APPROVED" | "DECLINED";
+
+export interface AccountSuspendRequest {
+  request_id: string;
+  account_id: string;
+  source_txn_id: string | null;
+  requested_by: string;
+  requested_at: string;
+  note: string | null;
+  status: SuspendRequestStatus;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  // Joined from the source transaction for context.
+  source_amount?: number | null;
+  source_risk_score?: number | null;
+  source_risk_level?: "LOW" | "MEDIUM" | "HIGH" | null;
+  source_created_at?: string | null;
+}
+
+export interface SuspendRequestPage {
+  items: AccountSuspendRequest[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface SuspendRequestSla {
+  awaiting: number;
+  approved: number;
+  declined: number;
+  within_sla: number;
+  at_risk: number;
+  breached: number;
+  total: number;
+}
+
+export interface BlockedAccount {
+  account_id: string;
+  reason: string | null;
+  source_txn_id: string | null;
+  blocked_by: string;
+  blocked_at: string;
+  active: number;
+}
+
 export interface ModelMetrics {
   accuracy: number;
   precision: number;

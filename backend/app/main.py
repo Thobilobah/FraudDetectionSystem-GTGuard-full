@@ -3,7 +3,7 @@ import json
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from backend.app.config import settings
-from backend.app.routes import prediction, analytics, razorpay, transactions, auth as auth_routes
+from backend.app.routes import prediction, analytics, razorpay, transactions, accounts, auth as auth_routes
 from backend.app.auth import get_current_user
 from backend.app.repositories.transaction_repository import db_repo
 from backend.app.services.prediction_service import prediction_service
@@ -36,6 +36,7 @@ app.include_router(auth_routes.router, tags=["Authentication"])
 app.include_router(prediction.router, tags=["Prediction & Demo"], dependencies=[Depends(get_current_user)])
 app.include_router(analytics.router, tags=["Analytics"], dependencies=[Depends(get_current_user)])
 app.include_router(transactions.router, tags=["Transactions Log"], dependencies=[Depends(get_current_user)])
+app.include_router(accounts.router, tags=["Account Suspension"], dependencies=[Depends(get_current_user)])
 
 # Razorpay webhooks come from Razorpay's servers, not a logged-in user -
 # they're authenticated separately via HMAC signature verification instead.
