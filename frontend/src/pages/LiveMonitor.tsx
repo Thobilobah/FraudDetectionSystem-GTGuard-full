@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import type { Transaction, AccountSuspendRequest, SuspendRequestSla } from "../types";
-import { resolveTransaction, suspendTransaction, bulkSuspendTransactions, authenticateTransaction, getStoredUser, getTransactionsPage, createSuspendRequest, getSuspendRequests, getSuspendRequestSla } from "../services/api";
+import type { Transaction, AccountSuspendRequest } from "../types";
+import { resolveTransaction, suspendTransaction, bulkSuspendTransactions, authenticateTransaction, getStoredUser, getTransactionsPage, createSuspendRequest, getSuspendRequests } from "../services/api";
 import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search, Fingerprint, Clock, Send, X } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
 import { formatPlace, isInNigeria } from "../utils/nigeriaPlaces";
-import { SlaPieChart } from "../components/SlaPieChart";
 
 interface LiveMonitorProps {
   onRefresh: () => void;
@@ -46,7 +45,6 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
   // Account-suspension workflow: analysts raise a request against the sender
   // account of a HIGH-risk (auto-BLOCKED) transaction, with a recommendation
   // note for the admin. The transaction itself is never modified.
-  const [sla, setSla] = useState<SuspendRequestSla | null>(null);
   const [requests, setRequests] = useState<AccountSuspendRequest[]>([]);
   const [reqTxn, setReqTxn] = useState<Transaction | null>(null);
   const [reqNote, setReqNote] = useState("");
@@ -54,14 +52,10 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
 
   const loadAccountWorkflow = useCallback(async () => {
     try {
-      const [slaData, reqPage] = await Promise.all([
-        getSuspendRequestSla(!isAdmin),
-        getSuspendRequests({ limit: 200, ...(isAdmin ? {} : { mine: true }) }),
-      ]);
-      setSla(slaData);
+      const reqPage = await getSuspendRequests({ limit: 200, ...(isAdmin ? {} : { mine: true }) });
       setRequests(reqPage.items);
     } catch (e) {
-      // Non-fatal: the surveillance stream still works without this card.
+      // Non-fatal: the surveillance stream still works without the request state.
       console.error("Failed to load account-suspension data:", e);
     }
   }, [isAdmin]);
@@ -484,12 +478,6 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
           Refresh Feeds
         </button>
       </div>
-
-      <SlaPieChart
-        sla={sla}
-        title="Account Review SLA"
-        subtitle={isAdmin ? "All account-suspension requests" : "Your account-suspension requests"}
-      />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Logs Table */}

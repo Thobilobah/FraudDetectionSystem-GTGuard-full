@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import type { RealTimeMetrics, ModelMetadata, Transaction } from "../types";
+import type { RealTimeMetrics, ModelMetadata, Transaction, SuspendRequestSla } from "../types";
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Bar, Legend
@@ -8,8 +8,9 @@ import {
   ShieldAlert, ShieldCheck, Activity, Percent, ArrowUpRight, TrendingUp, AlertTriangle, Inbox, Flag, Loader2, Clock
 } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
-import { getStoredUser, getTransactionsPage, type QueueMetrics } from "../services/api";
+import { getStoredUser, getTransactionsPage, getSuspendRequestSla, type QueueMetrics } from "../services/api";
 import { parseApiTimestamp } from "../utils/time";
+import { SlaPieChart } from "../components/SlaPieChart";
 
 interface DashboardProps {
   metrics: RealTimeMetrics;
@@ -50,6 +51,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [myFlagsPage, setMyFlagsPage] = useState(0);
   const [myFlagsLoading, setMyFlagsLoading] = useState(true);
 
+  // Account-suspension review SLA (admin decision latency), polled like the
+  // rest of the dashboard. Analysts see only their own requests; admins see
+  // the whole book of suspension requests.
+  const [sla, setSla] = useState<SuspendRequestSla | null>(null);
+
   useEffect(() => {
     if (!analystEmail) return;
     let alive = true;
@@ -79,6 +85,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const id = window.setInterval(loadFlags, 10000);
     return () => { alive = false; window.clearInterval(id); };
   }, [analystEmail, myFlagsPage]);
+
+  useEffect(() => {
+    let alive = true;
+    const loadSla = async () => {
+      try {
+        const data = await getSuspendRequestSla(!isAdmin);
+        if (alive) setSla(data);
+      } catch (e) {
+        console.error("Account review SLA failed:", e);
+      }
+    };
+    loadSla();
+    const id = window.setInterval(loadSla, 10000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, [isAdmin]);
 
   const myFlagsTotalPages = Math.max(1, Math.ceil(myFlagsTotal / myFlagsPageSize));
 
@@ -180,6 +201,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         ))}
       </div>
+
+      {/* Account Review SLA - admin decision latency on account-suspension
+          requests, shown just above the analyst's own flagged work */}
+      <SlaPieChart
+        sla={sla}
+        title="Account Review SLA"
+        subtitle={isAdmin ? "All account-suspension requests" : "Your account-suspension requests"}
+      />
 
       {/* Analyst's own flagged work - analysts only, uniquely scoped to
           claimed_by = this analyst's email (admins use the Review Queue) */}
