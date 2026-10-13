@@ -45,7 +45,7 @@ _PLACEHOLDER_RE = re.compile(r"\?")
 # flag MEDIUM transactions; the backfill below marks any still-open PENDING
 # MEDIUM row awaiting user auth, and the 15-minute sweep then auto-blocks the
 # stale ones.
-SCHEMA_VERSION = "7"
+SCHEMA_VERSION = "8"
 
 # Cap how many historical rows feature engineering will load per queried
 # user/beneficiary. Bounded windows keep prediction latency flat as the
@@ -301,6 +301,22 @@ class TransactionRepository:
                 )
             """)
 
+            # 9. Watchlisted Accounts (admin "watch this account" instead of a
+            # hard block). Written when an admin WATCHLISTs a suspension
+            # request; a watchlist is a lighter touch than the blocklist - the
+            # account keeps transacting but is flagged for monitoring. Kept
+            # separate so a watch can later be escalated into a suspension.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS watchlisted_accounts (
+                    account_id TEXT PRIMARY KEY,
+                    reason TEXT,
+                    source_txn_id TEXT,
+                    watched_by TEXT,
+                    watched_at TEXT,
+                    active INTEGER DEFAULT 1
+                )
+            """)
+
             # Indexes for the hot query paths. CREATE INDEX IF NOT EXISTS is
             # idempotent (a no-op once present), so on the live Neon database
             # this block builds the indexes in-place on first deploy without
@@ -314,6 +330,7 @@ class TransactionRepository:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_asr_status_time ON account_suspend_requests (status, requested_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_asr_account ON account_suspend_requests (account_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_asr_requester ON account_suspend_requests (requested_by, requested_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_wa_active ON watchlisted_accounts (active, watched_at DESC)")
 
             conn.commit()
 
@@ -888,9 +905,9 @@ class TransactionRepository:
                 SELECT
                     COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
                     MIN(requested_at) FILTER (WHERE status = 'PENDING') AS oldest,
-                    COUNT(*) FILTER (WHERE status IN ('APPROVED', 'DECLINED')) AS completed_total,
+                    COUNT(*) FILTER (WHERE status IN ('APPROVED', 'DECLINED', 'WATCHLISTED')) AS completed_total,
                     COUNT(*) FILTER (WHERE reviewed_at IS NOT NULL) AS resolved_total,
-                    COUNT(*) FILTER (WHERE status IN ('APPROVED', 'DECLINED') AND reviewed_at >= ?) AS decided_24h
+                    COUNT(*) FILTER (WHERE status IN ('APPROVED', 'DECLINED', 'WATCHLISTED') AND reviewed_at >= ?) AS decided_24h
                 FROM account_suspend_requests
             """, (cutoff_24h,))
             agg = cursor.fetchone()
@@ -1043,9 +1060,10 @@ class TransactionRepository:
 
     def review_suspend_request(self, request_id: str, decision: str,
                                reviewed_by: str) -> dict:
-        """Admin approves or declines a PENDING request. APPROVED also upserts
-        the account into the blocklist (active=1); DECLINED only stamps the
-        request. The status='PENDING' guard makes the decision race-safe."""
+        """Admin decides a PENDING request. APPROVED upserts the account into
+        the blocklist; WATCHLISTED upserts it into the watchlist (a lighter
+        monitoring status); DECLINED only stamps the request (legacy). The
+        status='PENDING' guard makes the decision race-safe."""
         reviewed_at = datetime.now().isoformat()
         with self.get_connection() as conn:
             cursor = conn.execute("""
@@ -1083,6 +1101,29 @@ class TransactionRepository:
                     reviewed_by,
                     reviewed_at,
                 ))
+                # A full suspension supersedes any lighter watchlist entry.
+                conn.execute(
+                    "UPDATE watchlisted_accounts SET active = 0 WHERE account_id = ?",
+                    (updated["account_id"],),
+                )
+            elif decision == "WATCHLISTED":
+                conn.execute("""
+                    INSERT INTO watchlisted_accounts
+                    (account_id, reason, source_txn_id, watched_by, watched_at, active)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                    ON CONFLICT (account_id) DO UPDATE SET
+                        reason = EXCLUDED.reason,
+                        source_txn_id = EXCLUDED.source_txn_id,
+                        watched_by = EXCLUDED.watched_by,
+                        watched_at = EXCLUDED.watched_at,
+                        active = 1
+                """, (
+                    updated["account_id"],
+                    updated["note"] or "Account placed on watchlist after high-risk fraud review",
+                    updated["source_txn_id"],
+                    reviewed_by,
+                    reviewed_at,
+                ))
             conn.commit()
             return dict(updated)
 
@@ -1106,6 +1147,26 @@ class TransactionRepository:
                 return {"error": "not_found"}
             return dict(updated)
 
+    def get_watchlisted_accounts(self, active: int = 1) -> list:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM watchlisted_accounts WHERE active = ? ORDER BY watched_at DESC",
+                (active,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def remove_from_watchlist(self, account_id: str) -> dict:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE watchlisted_accounts SET active = 0 WHERE account_id = ? RETURNING *",
+                (account_id,),
+            )
+            updated = cursor.fetchone()
+            conn.commit()
+            if not updated:
+                return {"error": "not_found"}
+            return dict(updated)
+
     def suspend_request_sla(self, requested_by: str = "") -> dict:
         """SLA distribution for account-suspension requests, measured as the
         admin-decision latency (reviewed_at - requested_at, in minutes).
@@ -1119,6 +1180,7 @@ class TransactionRepository:
                 SELECT
                     COUNT(*) FILTER (WHERE r.status = 'PENDING') AS awaiting,
                     COUNT(*) FILTER (WHERE r.status = 'APPROVED') AS approved,
+                    COUNT(*) FILTER (WHERE r.status = 'WATCHLISTED') AS watchlisted,
                     COUNT(*) FILTER (WHERE r.status = 'DECLINED') AS declined,
                     COUNT(*) FILTER (WHERE r.status <> 'PENDING' AND
                         EXTRACT(EPOCH FROM (r.reviewed_at::timestamp - r.requested_at::timestamp)) / 60.0 < 30) AS within_sla,
@@ -1133,6 +1195,7 @@ class TransactionRepository:
             row = cursor.fetchone()
         awaiting = int(row["awaiting"] or 0)
         approved = int(row["approved"] or 0)
+        watchlisted = int(row["watchlisted"] or 0)
         declined = int(row["declined"] or 0)
         within_sla = int(row["within_sla"] or 0)
         at_risk = int(row["at_risk"] or 0)
@@ -1140,11 +1203,12 @@ class TransactionRepository:
         return {
             "awaiting": awaiting,
             "approved": approved,
+            "watchlisted": watchlisted,
             "declined": declined,
             "within_sla": within_sla,
             "at_risk": at_risk,
             "breached": breached,
-            "total": awaiting + approved + declined,
+            "total": awaiting + approved + watchlisted + declined,
         }
 
     def run_auth_timeout_sweep(self) -> dict:

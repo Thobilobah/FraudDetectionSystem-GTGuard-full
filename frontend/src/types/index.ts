@@ -37,7 +37,7 @@ export interface TransactionPage {
   offset: number;
 }
 
-export type SuspendRequestStatus = "PENDING" | "APPROVED" | "DECLINED";
+export type SuspendRequestStatus = "PENDING" | "APPROVED" | "WATCHLISTED" | "DECLINED";
 
 export interface AccountSuspendRequest {
   request_id: string;
@@ -66,6 +66,7 @@ export interface SuspendRequestPage {
 export interface SuspendRequestSla {
   awaiting: number;
   approved: number;
+  watchlisted: number;
   declined: number;
   within_sla: number;
   at_risk: number;
@@ -79,6 +80,15 @@ export interface BlockedAccount {
   source_txn_id: string | null;
   blocked_by: string;
   blocked_at: string;
+  active: number;
+}
+
+export interface WatchlistedAccount {
+  account_id: string;
+  reason: string | null;
+  source_txn_id: string | null;
+  watched_by: string;
+  watched_at: string;
   active: number;
 }
 

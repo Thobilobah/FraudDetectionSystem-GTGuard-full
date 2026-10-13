@@ -50,7 +50,7 @@ def create_suspend_request(
 
 @router.get("/accounts/suspend-requests")
 def list_suspend_requests(
-    status: str = Query("", description="PENDING | APPROVED | DECLINED (empty = all)"),
+    status: str = Query("", description="PENDING | APPROVED | WATCHLISTED | DECLINED (empty = all)"),
     mine: bool = Query(False, description="Only this user's own requests (always true for analysts)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -59,8 +59,8 @@ def list_suspend_requests(
     """List account-suspension requests. Analysts always see only their own;
     admins see all (unless mine=true)."""
     status_filter = status.strip().upper()
-    if status_filter and status_filter not in ("PENDING", "APPROVED", "DECLINED"):
-        raise HTTPException(status_code=400, detail="status must be PENDING, APPROVED or DECLINED.")
+    if status_filter and status_filter not in ("PENDING", "APPROVED", "WATCHLISTED", "DECLINED"):
+        raise HTTPException(status_code=400, detail="status must be PENDING, APPROVED, WATCHLISTED or DECLINED.")
 
     requested_by = ""
     if mine or current_user.get("role") != "admin":
@@ -100,11 +100,12 @@ def review_suspend_request(
     payload: ReviewSuspendRequest,
     current_user: dict = Depends(require_admin),
 ):
-    """Admin-only: approve (account is added to the blocklist) or decline a
-    pending account-suspension request. Enforced server-side via require_admin."""
+    """Admin-only: approve (account is added to the blocklist), watchlist
+    (account is flagged for monitoring) or decline (legacy) a pending
+    account-suspension request. Enforced server-side via require_admin."""
     decision = (payload.decision or "").strip().upper()
-    if decision not in ("APPROVED", "DECLINED"):
-        raise HTTPException(status_code=400, detail="decision must be 'APPROVED' or 'DECLINED'.")
+    if decision not in ("APPROVED", "WATCHLISTED", "DECLINED"):
+        raise HTTPException(status_code=400, detail="decision must be 'APPROVED', 'WATCHLISTED' or 'DECLINED'.")
 
     try:
         result = db_repo.review_suspend_request(request_id, decision, reviewed_by=current_user["email"])
@@ -137,4 +138,26 @@ def unblock_account(account_id: str, current_user: dict = Depends(require_admin)
         raise HTTPException(status_code=500, detail=f"Failed to unblock account: {str(e)}")
     if result.get("error") == "not_found":
         raise HTTPException(status_code=404, detail="Account is not on the blocklist.")
+    return result
+
+
+@router.get("/accounts/watchlisted")
+def get_watchlisted_accounts(current_user: dict = Depends(require_admin)):
+    """Admin: accounts flagged via a WATCHLISTED suspension request."""
+    try:
+        return {"items": db_repo.get_watchlisted_accounts(active=1)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/accounts/{account_id}/watchlist")
+def unwatch_account(account_id: str, current_user: dict = Depends(require_admin)):
+    """Admin: remove an account from the watchlist (sets active=0,
+    preserving the audit trail)."""
+    try:
+        result = db_repo.remove_from_watchlist(account_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to remove account from watchlist: {str(e)}")
+    if result.get("error") == "not_found":
+        raise HTTPException(status_code=404, detail="Account is not on the watchlist.")
     return result

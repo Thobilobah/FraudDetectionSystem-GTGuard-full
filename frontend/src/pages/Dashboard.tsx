@@ -5,7 +5,8 @@ import {
   BarChart, Bar, Legend
 } from "recharts";
 import { 
-  ShieldAlert, ShieldCheck, Activity, Percent, ArrowUpRight, TrendingUp, AlertTriangle, Inbox, Flag, Loader2, Clock
+  ShieldAlert, ShieldCheck, Activity, Percent, ArrowUpRight, TrendingUp, AlertTriangle, Inbox, Flag, Loader2, Clock, Eye
+
 } from "lucide-react";
 import { useTheme } from "../context/ThemeContext";
 import { getStoredUser, getSuspendRequestSla, getSuspendRequests, type QueueMetrics } from "../services/api";
@@ -304,6 +305,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         ) : req.status === "APPROVED" ? (
                           <span className="inline-flex items-center gap-1.5 text-xs font-bold text-brand-danger bg-brand-danger/10 border border-brand-danger/20 px-2 py-0.5 rounded">
                             <ShieldAlert className="h-3 w-3" /> Approved{req.reviewed_by ? ` by ${req.reviewed_by}` : ""}
+                          </span>
+                        ) : req.status === "WATCHLISTED" ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-brand-info bg-brand-info/10 border border-brand-info/20 px-2 py-0.5 rounded">
+                            <Eye className="h-3 w-3" /> Watchlisted{req.reviewed_by ? ` by ${req.reviewed_by}` : ""}
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 text-xs font-bold text-dark-muted bg-dark-border/40 px-2 py-0.5 rounded">

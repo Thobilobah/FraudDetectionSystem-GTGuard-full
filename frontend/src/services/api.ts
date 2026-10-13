@@ -2,6 +2,7 @@ import axios from "axios";
 import type {
   Transaction, TransactionPage, AnalyticsResponse,
   AccountSuspendRequest, SuspendRequestPage, SuspendRequestSla, BlockedAccount,
+  WatchlistedAccount,
 } from "../types";
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -296,7 +297,7 @@ export const createSuspendRequest = async (
 };
 
 export interface SuspendRequestParams {
-  status?: "PENDING" | "APPROVED" | "DECLINED";
+  status?: "PENDING" | "APPROVED" | "WATCHLISTED" | "DECLINED";
   /** Only this user's own requests (forced true for analysts server-side). */
   mine?: boolean;
   limit?: number;
@@ -318,10 +319,11 @@ export const getSuspendRequestSla = async (mine = false): Promise<SuspendRequest
 };
 
 /** Admin decision on an account-suspension request. APPROVED adds the account
- * to the blocklist; DECLINED just closes the request. */
+ * to the blocklist; WATCHLISTED flags it for monitoring; DECLINED just closes
+ * the request (legacy). */
 export const reviewSuspendRequest = async (
   requestId: string,
-  decision: "APPROVED" | "DECLINED"
+  decision: "APPROVED" | "WATCHLISTED" | "DECLINED"
 ): Promise<AccountSuspendRequest> => {
   const response = await api.post(
     `/accounts/suspend-requests/${encodeURIComponent(requestId)}/review`,
@@ -339,6 +341,18 @@ export const getBlockedAccounts = async (): Promise<BlockedAccount[]> => {
 /** Admin: lift an approved account suspension (preserves the audit trail). */
 export const unblockAccount = async (accountId: string): Promise<BlockedAccount> => {
   const response = await api.delete(`/accounts/${encodeURIComponent(accountId)}/block`);
+  return response.data;
+};
+
+/** Admin: accounts flagged via a WATCHLISTED suspension request. */
+export const getWatchlistedAccounts = async (): Promise<WatchlistedAccount[]> => {
+  const response = await api.get("/accounts/watchlisted");
+  return response.data.items ?? [];
+};
+
+/** Admin: remove an account from the watchlist (preserves the audit trail). */
+export const removeFromWatchlist = async (accountId: string): Promise<WatchlistedAccount> => {
+  const response = await api.delete(`/accounts/${encodeURIComponent(accountId)}/watchlist`);
   return response.data;
 };
 

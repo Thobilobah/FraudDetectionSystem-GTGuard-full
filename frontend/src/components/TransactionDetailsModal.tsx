@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import type { Transaction, AccountSuspendRequest } from "../types";
 import {
   X, ShieldCheck, ShieldAlert, AlertCircle, MapPin, Tablet, UserCheck,
-  Shield, Activity, PauseCircle, Loader2, User, Fingerprint, Ban,
+  Shield, Activity, PauseCircle, Loader2, User, Fingerprint, Ban, Eye,
 } from "lucide-react";
 import { getTransactionById, reviewSuspendRequest } from "../services/api";
 import { useToast } from "../context/ToastContext";
@@ -18,7 +18,7 @@ interface TransactionDetailsModalProps {
 
 /**
  * Read-only transaction inspector opened from the Review Queue, with the
- * admin account-suspension decision (Suspend / Decline) inline. Mirrors the
+ * admin account-suspension decision (Suspend / Watchlist) inline. Mirrors the
  * Live Monitor detailed-analysis pane so both surfaces show the same full
  * transaction breakdown.
  */
@@ -66,7 +66,7 @@ export const TransactionDetailsModal: React.FC<TransactionDetailsModalProps> = (
   const isAuthHold = (t: Transaction) =>
     t.status === "PENDING" && t.required_action === "USER_AUTH";
 
-  const handleDecide = async (decision: "APPROVED" | "DECLINED") => {
+  const handleDecide = async (decision: "APPROVED" | "WATCHLISTED") => {
     if (!suspendRequest) return;
     setDeciding(true);
     try {
@@ -74,7 +74,7 @@ export const TransactionDetailsModal: React.FC<TransactionDetailsModalProps> = (
       if (decision === "APPROVED") {
         showToast("success", "Account suspended", `${suspendRequest.account_id} was added to the account blocklist.`);
       } else {
-        showToast("danger", "Request declined", `${suspendRequest.account_id} was left unblocked.`);
+        showToast("success", "Account watchlisted", `${suspendRequest.account_id} is now flagged for monitoring.`);
       }
       onReviewed?.();
       onClose();
@@ -163,6 +163,8 @@ export const TransactionDetailsModal: React.FC<TransactionDetailsModalProps> = (
                 className={`rounded-lg p-4 space-y-3 border ${
                   suspendRequest.status === "APPROVED"
                     ? "bg-brand-danger/5 border-brand-danger/30"
+                    : suspendRequest.status === "WATCHLISTED"
+                    ? "bg-brand-info/5 border-brand-info/30"
                     : suspendRequest.status === "DECLINED"
                     ? "bg-gray-50 dark:bg-white/5 border-dark-border"
                     : "bg-brand-warning/5 border-brand-warning/30"
@@ -198,10 +200,11 @@ export const TransactionDetailsModal: React.FC<TransactionDetailsModalProps> = (
                     </button>
                     <button
                       disabled={deciding}
-                      onClick={() => handleDecide("DECLINED")}
-                      className="flex-1 bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text text-xs font-bold py-2 rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                      onClick={() => handleDecide("WATCHLISTED")}
+                      className="flex-1 bg-brand-info text-white text-xs font-bold py-2 rounded-lg hover:bg-brand-info/90 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
                     >
-                      <X className="h-3.5 w-3.5" /> Decline
+                      {deciding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />}
+                      Watchlist
                     </button>
                   </div>
                 )}

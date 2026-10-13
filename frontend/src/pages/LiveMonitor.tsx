@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { Transaction, AccountSuspendRequest } from "../types";
 import { resolveTransaction, authenticateTransaction, getStoredUser, getTransactionsPage, createSuspendRequest, getSuspendRequests } from "../services/api";
-import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search, Fingerprint, Clock, Send, X } from "lucide-react";
+import { ShieldCheck, ShieldAlert, AlertCircle, RefreshCw, MapPin, Tablet, UserCheck, Shield, Activity, PauseCircle, Loader2, User, ChevronLeft, ChevronRight, Search, Fingerprint, Clock, Send, X, Eye } from "lucide-react";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
 import { formatPlace, isInNigeria } from "../utils/nigeriaPlaces";
@@ -358,6 +358,13 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
           </span>
         );
       }
+      if (req?.status === "WATCHLISTED") {
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-md bg-brand-info/10 text-brand-info border border-brand-info/30 whitespace-nowrap" title="Account on the admin watchlist">
+            <Eye className="h-3 w-3" /> Account Watchlisted
+          </span>
+        );
+      }
       return <span className="text-xs font-bold text-brand-danger">Blocked</span>;
     }
     return <span className="text-xs font-bold text-brand-success">Approved</span>;
@@ -682,6 +689,7 @@ export const LiveMonitor: React.FC<LiveMonitorProps> = ({ onRefresh }) => {
                 if (!req) return null;
                 const tone =
                   req.status === "APPROVED" ? "border-brand-danger/30 bg-brand-danger/5 text-brand-danger"
+                  : req.status === "WATCHLISTED" ? "border-brand-info/30 bg-brand-info/5 text-brand-info"
                   : req.status === "DECLINED" ? "border-dark-border bg-gray-50 dark:bg-white/5 text-dark-muted"
                   : "border-brand-warning/30 bg-brand-warning/5 text-brand-warning";
                 return (

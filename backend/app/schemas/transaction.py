@@ -52,4 +52,4 @@ class SuspendAccountRequest(BaseModel):
 
 class ReviewSuspendRequest(BaseModel):
     """Admin decision on an account-suspension request."""
-    decision: str = Field(..., description="APPROVED or DECLINED")
+    decision: str = Field(..., description="APPROVED, WATCHLISTED or DECLINED")

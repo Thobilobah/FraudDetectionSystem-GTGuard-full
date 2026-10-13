@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useState } from "react";
-import type { AccountSuspendRequest, SuspendRequestSla, BlockedAccount } from "../types";
+import type { AccountSuspendRequest, SuspendRequestSla, BlockedAccount, WatchlistedAccount } from "../types";
 import {
-  Ban, X, Clock, Loader2, ShieldAlert, ShieldCheck,
+  Ban, X, Clock, Loader2, ShieldAlert, ShieldCheck, Eye, EyeOff,
   ChevronLeft, ChevronRight, UserCheck, Undo2, Inbox,
 } from "lucide-react";
 import {
   getSuspendRequests, getSuspendRequestSla, reviewSuspendRequest,
-  getBlockedAccounts, unblockAccount,
+  getBlockedAccounts, unblockAccount, getWatchlistedAccounts, removeFromWatchlist,
 } from "../services/api";
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
@@ -15,17 +15,18 @@ import { TransactionDetailsModal } from "./TransactionDetailsModal";
 
 const POLL_MS = 10000;
 
-type ReqFilter = "PENDING" | "APPROVED" | "DECLINED";
+type ReqFilter = "PENDING" | "APPROVED" | "WATCHLISTED" | "DECLINED";
 
 /**
  * Admin panel for the account-suspension workflow. Analysts raise a request
  * against a sender account (with a recommendation note) after a HIGH-risk
- * transaction was auto-BLOCKED; the admin approves (account joins the
- * blocklist) or declines. Surfaces the SLA pie chart on top.
+ * transaction was auto-BLOCKED; the admin suspends the account (APPROVED ->
+ * blocklist), adds it to the watchlist (WATCHLISTED -> monitored) or declines
+ * (DECLINED, legacy). Surfaces the SLA pie chart on top.
  */
 export const AccountRequestsPanel: React.FC = () => {
   const { showToast } = useToast();
-  const [view, setView] = useState<"requests" | "blocklist">("requests");
+  const [view, setView] = useState<"requests" | "blocklist" | "watchlist">("requests");
   const [filter, setFilter] = useState<ReqFilter>("PENDING");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
@@ -34,10 +35,12 @@ export const AccountRequestsPanel: React.FC = () => {
   const [total, setTotal] = useState(0);
   const [sla, setSla] = useState<SuspendRequestSla | null>(null);
   const [blocked, setBlocked] = useState<BlockedAccount[]>([]);
+  const [watchlist, setWatchlist] = useState<WatchlistedAccount[]>([]);
   const [fetching, setFetching] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [unblockingId, setUnblockingId] = useState<string | null>(null);
+  const [unwatchingId, setUnwatchingId] = useState<string | null>(null);
   const [detail, setDetail] = useState<{ txnId: string; request: AccountSuspendRequest | null } | null>(null);
 
   const refresh = useCallback(async () => {
@@ -75,26 +78,38 @@ export const AccountRequestsPanel: React.FC = () => {
     }
   }, []);
 
+  const loadWatchlist = useCallback(async () => {
+    setFetching(true);
+    setLoadError(null);
+    try {
+      setWatchlist(await getWatchlistedAccounts());
+    } catch (e) {
+      console.error("Watchlist load failed:", e);
+      setLoadError("Could not load the account watchlist.");
+    } finally {
+      setFetching(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (view === "requests") {
       refresh();
       const id = window.setInterval(refresh, POLL_MS);
       return () => window.clearInterval(id);
     }
-    loadBlocklist();
-  }, [view, refresh, loadBlocklist]);
+    if (view === "blocklist") loadBlocklist();
+    else loadWatchlist();
+  }, [view, refresh, loadBlocklist, loadWatchlist]);
 
-  const decide = async (request: AccountSuspendRequest, decision: "APPROVED" | "DECLINED") => {
+  const decide = async (request: AccountSuspendRequest, decision: "APPROVED" | "WATCHLISTED") => {
     setBusyId(request.request_id);
     try {
       const updated = await reviewSuspendRequest(request.request_id, decision);
-      showToast(
-        decision === "APPROVED" ? "success" : "danger",
-        decision === "APPROVED" ? "Account suspended" : "Request declined",
-        decision === "APPROVED"
-          ? `${updated.account_id} was added to the account blocklist.`
-          : `${request.account_id} was left unblocked.`
-      );
+      if (decision === "APPROVED") {
+        showToast("success", "Account suspended", `${updated.account_id} was added to the account blocklist.`);
+      } else {
+        showToast("success", "Account watchlisted", `${updated.account_id} is now flagged for monitoring.`);
+      }
       await refresh();
     } catch (e: any) {
       const detail = e?.response?.data?.detail;
@@ -115,6 +130,20 @@ export const AccountRequestsPanel: React.FC = () => {
       showToast("danger", "Unblock failed", typeof detail === "string" ? detail : "Could not unblock this account.");
     } finally {
       setUnblockingId(null);
+    }
+  };
+
+  const handleUnwatch = async (accountId: string) => {
+    setUnwatchingId(accountId);
+    try {
+      await removeFromWatchlist(accountId);
+      showToast("success", "Watchlist updated", `${accountId} was removed from the watchlist.`);
+      await loadWatchlist();
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      showToast("danger", "Remove failed", typeof detail === "string" ? detail : "Could not remove this account from the watchlist.");
+    } finally {
+      setUnwatchingId(null);
     }
   };
 
@@ -143,6 +172,7 @@ export const AccountRequestsPanel: React.FC = () => {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const statusPill = (status: string) => {
     if (status === "APPROVED") return <span className="text-brand-success font-bold text-xs flex items-center gap-1"><ShieldCheck className="h-3.5 w-3.5" /> APPROVED</span>;
+    if (status === "WATCHLISTED") return <span className="text-brand-info font-bold text-xs flex items-center gap-1"><Eye className="h-3.5 w-3.5" /> WATCHLISTED</span>;
     if (status === "DECLINED") return <span className="text-dark-muted font-bold text-xs flex items-center gap-1"><X className="h-3.5 w-3.5" /> DECLINED</span>;
     return <span className="text-brand-warning font-bold text-xs flex items-center gap-1"><Clock className="h-3.5 w-3.5" /> PENDING</span>;
   };
@@ -161,6 +191,14 @@ export const AccountRequestsPanel: React.FC = () => {
           <Inbox className="h-3.5 w-3.5" /> Suspension Requests
         </button>
         <button
+          onClick={() => setView("watchlist")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+            view === "watchlist" ? "bg-brand-info text-white" : "bg-dark-card border border-dark-border text-dark-muted hover:text-dark-text"
+          }`}
+        >
+          <Eye className="h-3.5 w-3.5" /> Watchlist
+        </button>
+        <button
           onClick={() => setView("blocklist")}
           className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition ${
             view === "blocklist" ? "bg-brand-danger text-white" : "bg-dark-card border border-dark-border text-dark-muted hover:text-dark-text"
@@ -173,7 +211,7 @@ export const AccountRequestsPanel: React.FC = () => {
       {view === "requests" ? (
         <>
           <div className="flex flex-wrap items-center gap-2">
-            {(["PENDING", "APPROVED", "DECLINED"] as ReqFilter[]).map((f) => (
+            {(["PENDING", "APPROVED", "WATCHLISTED", "DECLINED"] as ReqFilter[]).map((f) => (
               <button
                 key={f}
                 onClick={() => { setFilter(f); setPage(0); }}
@@ -184,7 +222,7 @@ export const AccountRequestsPanel: React.FC = () => {
                     : "bg-dark-card border border-dark-border text-dark-muted hover:text-dark-text"
                 }`}
               >
-                {f === "PENDING" ? "Pending" : f === "APPROVED" ? "Approved" : "Declined"}
+                {f === "PENDING" ? "Pending" : f === "APPROVED" ? "Approved" : f === "WATCHLISTED" ? "Watchlisted" : "Declined"}
               </button>
             ))}
           </div>
@@ -265,10 +303,11 @@ export const AccountRequestsPanel: React.FC = () => {
                                 </button>
                                 <button
                                   disabled={busyId !== null}
-                                  onClick={(e) => { e.stopPropagation(); decide(row, "DECLINED"); }}
-                                  className="bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text text-xs font-bold py-1.5 px-3 rounded-lg transition disabled:opacity-50 flex items-center gap-1.5"
+                                  onClick={(e) => { e.stopPropagation(); decide(row, "WATCHLISTED"); }}
+                                  className="bg-dark-bg border border-brand-info/40 text-brand-info hover:bg-brand-info/10 text-xs font-bold py-1.5 px-3 rounded-lg transition disabled:opacity-50 flex items-center gap-1.5"
                                 >
-                                  <X className="h-3.5 w-3.5" /> Decline
+                                  {busyId === row.request_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />}
+                                  Watchlist
                                 </button>
                               </div>
                             ) : (
@@ -340,7 +379,7 @@ export const AccountRequestsPanel: React.FC = () => {
             </div>
           </div>
         </>
-      ) : (
+      ) : view === "blocklist" ? (
         <div className="bg-dark-card border border-dark-border rounded-xl shadow-glow-brand overflow-hidden">
           {blocked.length > 0 || fetching ? (
             <table className="w-full text-left border-collapse">
@@ -391,13 +430,65 @@ export const AccountRequestsPanel: React.FC = () => {
             </div>
           )}
         </div>
+      ) : (
+        <div className="bg-dark-card border border-dark-border rounded-xl shadow-glow-brand overflow-hidden">
+          {watchlist.length > 0 || fetching ? (
+            <table className="w-full text-left border-collapse">
+              <thead className="bg-gray-100/70 dark:bg-dark-card text-[11px] text-dark-muted uppercase font-bold tracking-wider">
+                <tr>
+                  <th className="px-3 py-3">Account</th>
+                  <th className="px-3 py-3">Reason</th>
+                  <th className="px-3 py-3">Source Transaction</th>
+                  <th className="px-3 py-3">Watched By</th>
+                  <th className="px-3 py-3 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
+                {watchlist.map((acc) => (
+                  <tr
+                    key={acc.account_id}
+                    onClick={() => acc.source_txn_id && setDetail({ txnId: acc.source_txn_id, request: null })}
+                    className={`hover:bg-dark-border/10 transition ${acc.source_txn_id ? "cursor-pointer" : ""}`}
+                  >
+                    <td className="px-3 py-3.5">
+                      <span className="text-dark-text font-semibold font-mono text-xs flex items-center gap-1.5">
+                        <Eye className="h-3.5 w-3.5 text-brand-info" /> {acc.account_id}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3.5 text-dark-text text-xs max-w-[280px]">{acc.reason || "—"}</td>
+                    <td className="px-3 py-3.5 text-dark-text font-mono text-xs">{acc.source_txn_id || "—"}</td>
+                    <td className="px-3 py-3.5 text-xs">
+                      <span className="text-brand-info font-semibold block">{acc.watched_by}</span>
+                      <span className="text-[10px] text-dark-muted">{fmtTime(acc.watched_at)}</span>
+                    </td>
+                    <td className="px-3 py-3.5 text-right">
+                      <button
+                        disabled={unwatchingId !== null}
+                        onClick={(e) => { e.stopPropagation(); handleUnwatch(acc.account_id); }}
+                        className="inline-flex items-center gap-1.5 bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text text-xs font-bold py-1.5 px-3 rounded-lg transition disabled:opacity-50"
+                        title={`Remove ${acc.account_id} from the watchlist`}
+                      >
+                        {unwatchingId === acc.account_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <EyeOff className="h-3.5 w-3.5" />}
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="py-20 text-center text-dark-muted text-xs">
+              {loadError ? <span className="text-brand-danger">{loadError}</span> : "No accounts are being watched."}
+            </div>
+          )}
+        </div>
       )}
 
       <TransactionDetailsModal
         transactionId={detail?.txnId ?? null}
         suspendRequest={detail?.request ?? null}
         onClose={() => setDetail(null)}
-        onReviewed={view === "requests" ? refresh : loadBlocklist}
+        onReviewed={view === "requests" ? refresh : view === "blocklist" ? loadBlocklist : loadWatchlist}
       />
     </div>
   );

@@ -11,10 +11,11 @@ const POLL_MS = 10000;
  * Admin Review Queue - the analyst-requested account-suspension workflow.
  *
  * Pending  = account-suspension requests raised by analysts, awaiting the
- *            admin's decision (approve -> the account joins the blocklist,
- *            or decline).
- * Completed = every request the admin has decided (APPROVED or DECLINED),
- *            stamped with reviewed_by/reviewed_at.
+ *            admin's decision (suspend -> the account joins the blocklist,
+ *            watchlist -> flagged for monitoring, or decline).
+ * Completed = every request the admin has decided
+ *            (APPROVED / WATCHLISTED / DECLINED), stamped with
+ *            reviewed_by/reviewed_at.
  *
  * The counters are sourced from getQueueMetrics() (which now reads
  * account_suspend_requests) on a 10s poll, so the pending counter climbs on
