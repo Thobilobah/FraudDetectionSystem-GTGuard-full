@@ -229,14 +229,14 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-dark-bg text-dark-text flex">
+    <div className="h-screen overflow-hidden bg-dark-bg text-dark-text flex">
       {/* Sidebar for Desktop */}
       <aside 
         className={`bg-dark-card border-r border-dark-border w-64 fixed inset-y-0 left-0 z-30 transform transition-transform md:translate-x-0 md:static ${
           isSidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        <div className="h-full flex flex-col justify-between p-5">
+        <div className="h-full flex flex-col justify-between p-5 overflow-y-auto">
           <div className="space-y-6">
             {/* Logo */}
             <div className="flex items-center gap-2 pb-4 border-b border-dark-border">

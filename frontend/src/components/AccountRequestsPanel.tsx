@@ -11,6 +11,7 @@ import {
 import { useToast } from "../context/ToastContext";
 import { parseApiTimestamp } from "../utils/time";
 import { SlaPieChart } from "./SlaPieChart";
+import { TransactionDetailsModal } from "./TransactionDetailsModal";
 
 const POLL_MS = 10000;
 
@@ -37,6 +38,7 @@ export const AccountRequestsPanel: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [unblockingId, setUnblockingId] = useState<string | null>(null);
+  const [detailTxnId, setDetailTxnId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setFetching(true);
@@ -213,7 +215,11 @@ export const AccountRequestsPanel: React.FC = () => {
                     {rows.map((row) => {
                       const aging = getAging(row);
                       return (
-                        <tr key={row.request_id} className="hover:bg-dark-border/10 transition">
+                        <tr
+                          key={row.request_id}
+                          onClick={() => row.source_txn_id && setDetailTxnId(row.source_txn_id)}
+                          className={`hover:bg-dark-border/10 transition ${row.source_txn_id ? "cursor-pointer" : ""}`}
+                        >
                           <td className="px-3 py-3.5 text-xs text-dark-muted font-semibold whitespace-nowrap">
                             <span className="flex items-center gap-1.5">
                               <Clock className="h-3.5 w-3.5" />
@@ -251,7 +257,7 @@ export const AccountRequestsPanel: React.FC = () => {
                               <div className="flex gap-2 justify-end">
                                 <button
                                   disabled={busyId !== null}
-                                  onClick={() => decide(row, "APPROVED")}
+                                  onClick={(e) => { e.stopPropagation(); decide(row, "APPROVED"); }}
                                   className="bg-brand-danger text-white text-xs font-bold py-1.5 px-3 rounded-lg hover:bg-brand-danger/90 transition disabled:opacity-50 flex items-center gap-1.5"
                                 >
                                   {busyId === row.request_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Ban className="h-3.5 w-3.5" />}
@@ -259,7 +265,7 @@ export const AccountRequestsPanel: React.FC = () => {
                                 </button>
                                 <button
                                   disabled={busyId !== null}
-                                  onClick={() => decide(row, "DECLINED")}
+                                  onClick={(e) => { e.stopPropagation(); decide(row, "DECLINED"); }}
                                   className="bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text text-xs font-bold py-1.5 px-3 rounded-lg transition disabled:opacity-50 flex items-center gap-1.5"
                                 >
                                   <X className="h-3.5 w-3.5" /> Decline
@@ -349,7 +355,11 @@ export const AccountRequestsPanel: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-dark-border text-sm">
                 {blocked.map((acc) => (
-                  <tr key={acc.account_id} className="hover:bg-dark-border/10 transition">
+                  <tr
+                    key={acc.account_id}
+                    onClick={() => acc.source_txn_id && setDetailTxnId(acc.source_txn_id)}
+                    className={`hover:bg-dark-border/10 transition ${acc.source_txn_id ? "cursor-pointer" : ""}`}
+                  >
                     <td className="px-3 py-3.5">
                       <span className="text-dark-text font-semibold font-mono text-xs flex items-center gap-1.5">
                         <ShieldAlert className="h-3.5 w-3.5 text-brand-danger" /> {acc.account_id}
@@ -364,7 +374,7 @@ export const AccountRequestsPanel: React.FC = () => {
                     <td className="px-3 py-3.5 text-right">
                       <button
                         disabled={unblockingId !== null}
-                        onClick={() => handleUnblock(acc.account_id)}
+                        onClick={(e) => { e.stopPropagation(); handleUnblock(acc.account_id); }}
                         className="inline-flex items-center gap-1.5 bg-dark-bg border border-dark-border text-dark-muted hover:text-dark-text text-xs font-bold py-1.5 px-3 rounded-lg transition disabled:opacity-50"
                       >
                         {unblockingId === acc.account_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Undo2 className="h-3.5 w-3.5" />}
@@ -382,6 +392,12 @@ export const AccountRequestsPanel: React.FC = () => {
           )}
         </div>
       )}
+
+      <TransactionDetailsModal
+        transactionId={detailTxnId}
+        onClose={() => setDetailTxnId(null)}
+        onResolved={view === "requests" ? refresh : loadBlocklist}
+      />
     </div>
   );
 };
